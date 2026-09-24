@@ -18,7 +18,17 @@ import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
+import baritone.api.BaritoneAPI;
+import baritone.api.pathing.goals.GoalXZ;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.MobSpawnerBlockEntity;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.World;
+import net.minecraft.world.chunk.WorldChunk;
+import java.util.Map;
 import net.minecraft.client.gui.screen.ingame.BookScreen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.component.DataComponentTypes;
@@ -90,6 +100,30 @@ public class QuillHider extends Module {
     private final Setting<Integer> damageReveal = sgBlind.add(new IntSetting.Builder()
         .name("damage-reveal").description("Ticks the screen stays visible after you take damage, so you can deal with it.").defaultValue(200).min(0).sliderMax(1200).build());
 
+    private final SettingGroup sgRun = settings.createGroup("Blind run");
+    private final Setting<Boolean> requireRun = sgRun.add(new BoolSetting.Builder()
+        .name("require-blind-run").description("The stash key only works at the dungeon a blind run led you to. Off = any chest (testing only).").defaultValue(true).build());
+    private final Setting<Keybind> runKey = sgRun.add(new KeybindSetting.Builder()
+        .name("run-key").description("In the nether: pick a random point you will never be shown and fly there with Baritone. Press again to resume a stalled run.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_O)).build());
+    private final Setting<Integer> minRadius = sgRun.add(new IntSetting.Builder()
+        .name("min-ow-radius").description("Closest the random point may be to 0,0 - in OVERWORLD blocks.").defaultValue(15000).min(0).sliderMax(1000000).build());
+    private final Setting<Integer> maxRadius = sgRun.add(new IntSetting.Builder()
+        .name("max-ow-radius").description("Farthest the random point may be from 0,0 - in OVERWORLD blocks (nether flight is an eighth of it).").defaultValue(100000).min(1000).sliderMax(5000000).build());
+    private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
+        .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
+    private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
+        .name("exit-tolerance").description("If you come out of the portal farther than this (overworld blocks) from the run's point, the run is void.").defaultValue(2500).min(200).sliderMax(20000).build());
+    private final Setting<Integer> dungeonRadius = sgRun.add(new IntSetting.Builder()
+        .name("dungeon-radius").description("You must be within this many blocks of the run's spawner to stash.").defaultValue(10).min(4).sliderMax(24).build());
+
+    /** NONE -> FLYING (nether, Baritone) -> ARRIVED (build a portal) -> OVERWORLD (fly, find a spawner) -> DESIGNATED (stash allowed here) */
+    private enum RunStage { NONE, FLYING, ARRIVED, OVERWORLD, DESIGNATED }
+    private RunStage run = RunStage.NONE;
+    private int targetNX, targetNZ;                                   // the run's point, nether coords - lives here and nowhere else
+    private BlockPos spawner;                                         // the run's dungeon
+    private RegistryKey<World> lastDim;
+    private long lastScan;
+
     private enum Stage { IDLE, SIGNING, STASHING, RETRY }
     private Stage stage = Stage.IDLE;
     private long tick, stageSince, lastDamageTick = -100000;
@@ -108,6 +142,9 @@ public class QuillHider extends Module {
     @Override
     public void onActivate() {
         stage = Stage.IDLE;
+        run = RunStage.NONE;
+        spawner = null;
+        lastDim = mc.world == null ? null : mc.world.getRegistryKey();
         warnedMaps = false;
         lastHealth = mc.player == null ? 20 : mc.player.getHealth();
         new Thread(this::resync, "quillcoin-resync").start();
@@ -120,6 +157,7 @@ public class QuillHider extends Module {
     @EventHandler
     private void onKey(KeyEvent event) {
         if (event.action != KeyAction.Press || mc.player == null) return;
+        if (runKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); startOrResumeRun(); return; }
         if (!stashKey.get().matches(true, event.key, event.modifiers)) return;
         event.cancel();
         if (stage == Stage.RETRY) { retryStash(); return; }
@@ -133,6 +171,10 @@ public class QuillHider extends Module {
         }
         String me = mc.getSession() == null ? "" : mc.getSession().getUsername();
         if (!me.equals(author.get())) { error("You are %s, not %s - not hiding.", me, author.get()); return; }
+        if (requireRun.get()) {
+            if (run != RunStage.DESIGNATED || spawner == null) { error("No blind run brought you here. Press %s in the nether first.", runKey.get()); return; }
+            if (!mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get())) { error("This isn't the run's dungeon. Follow the arrow."); return; }
+        }
         for (String logger : new String[]{"chest-dump", "stash-audit", "net-worth", "layer-kit"}) {
             Module m = Modules.get().get(logger);
             if (m != null && m.isActive()) { error("%s is on - it logs chest contents. Turn it off first.", m.title); return; }
@@ -195,6 +237,7 @@ public class QuillHider extends Module {
         if (h < lastHealth - 0.01f) lastDamageTick = tick;
         lastHealth = h;
         if (blind.get() && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
+        runTick();
 
         switch (stage) {
             case SIGNING -> {
@@ -256,7 +299,17 @@ public class QuillHider extends Module {
 
     @EventHandler(priority = EventPriority.LOWEST)
     private void onRender2D(Render2DEvent event) {
-        if (!blind.get() || mc.player == null || !mc.player.isGliding()) return;
+        if (mc.player == null) return;
+        if (run == RunStage.DESIGNATED && !(blind.get() && mc.player.isGliding())) {
+            event.drawContext.drawTextWithShadow(mc.textRenderer, arrow(), 6, 6, 0xFFE6C85A);
+        } else if (run == RunStage.FLYING && !mc.player.isGliding()) {
+            event.drawContext.drawTextWithShadow(mc.textRenderer, "blind run: take off (" + runKey.get() + " to resume)", 6, 6, 0xFFE6C85A);
+        } else if (run == RunStage.ARRIVED) {
+            event.drawContext.drawTextWithShadow(mc.textRenderer, "blind run: build a portal here and go through", 6, 6, 0xFFE6C85A);
+        } else if (run == RunStage.OVERWORLD) {
+            event.drawContext.drawTextWithShadow(mc.textRenderer, "blind run: fly around until a dungeon is found", 6, 6, 0xFFE6C85A);
+        }
+        if (!blind.get() || !mc.player.isGliding()) return;
         if (tick - lastDamageTick < damageReveal.get() || peekKey.get().isPressed()) return;
         event.drawContext.fill(0, 0, event.screenWidth, event.screenHeight, 0xFF000000);
         int rockets = 0;
@@ -265,6 +318,120 @@ public class QuillHider extends Module {
         event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
         event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 4, 0xFFAAAAAA);
         event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "hold " + peekKey.get() + " to peek", cx, cy + 16, 0xFF666666);
+    }
+
+    // ------------------------------------------------------------------ the blind run
+
+    private void startOrResumeRun() {
+        if (mc.world == null || mc.world.getRegistryKey() != World.NETHER) { error("Blind runs start in the nether."); return; }
+        String me = mc.getSession() == null ? "" : mc.getSession().getUsername();
+        if (!me.equals(author.get())) { error("You are %s, not %s.", me, author.get()); return; }
+        try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { error("Baritone isn't installed."); return; }
+        if (run == RunStage.FLYING) {
+            fly();
+            info("Resuming the run. Take off.");
+            return;
+        }
+        if (run != RunStage.NONE) { info("A run is already in progress (%s).", run.name().toLowerCase()); return; }
+        // uniform over the ring between min and max overworld radius, then scaled to the nether
+        double a = RNG.nextDouble() * Math.PI * 2;
+        double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
+        double r = Math.sqrt(lo * lo + RNG.nextDouble() * (hi * hi - lo * lo));
+        targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
+        targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
+        spawner = null;
+        run = RunStage.FLYING;
+        fly();
+        info("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
+    }
+
+    private void fly() {
+        try {
+            GoalXZ g = new GoalXZ(targetNX, targetNZ);
+            BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoal(g);
+            BaritoneAPI.getProvider().getPrimaryBaritone().getElytraProcess().pathTo(g);
+        } catch (Throwable t) { error("Couldn't hand the goal to Baritone: %s", t.getMessage()); run = RunStage.NONE; }
+    }
+
+    private boolean elytraActive() {
+        try { return BaritoneAPI.getProvider().getPrimaryBaritone().getElytraProcess().isActive(); } catch (Throwable t) { return false; }
+    }
+
+    private void runTick() {
+        RegistryKey<World> dim = mc.world.getRegistryKey();
+        if (lastDim != null && dim != lastDim) onDimensionChange(lastDim, dim);
+        lastDim = dim;
+        switch (run) {
+            case FLYING -> {
+                if (dim != World.NETHER) return;
+                double d = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
+                if (d <= arriveRadius.get() && !mc.player.isGliding()) {
+                    run = RunStage.ARRIVED;
+                    info("Arrived. Make a portal here and go through it - the run continues in the overworld.");
+                } else if (!elytraActive() && !mc.player.isGliding() && tick % 100 == 0) {
+                    info("Baritone isn't flying. Press %s to resume the run.", runKey.get());
+                }
+            }
+            case OVERWORLD -> {
+                if (dim != World.OVERWORLD || tick - lastScan < 20) return;
+                lastScan = tick;
+                BlockPos found = nearestDungeonSpawner();
+                if (found != null) {
+                    spawner = found;
+                    run = RunStage.DESIGNATED;
+                    info("Dungeon found. Follow the arrow, dig down, put the blocks back, and stash there.");
+                }
+            }
+            default -> {}
+        }
+    }
+
+    private void onDimensionChange(RegistryKey<World> from, RegistryKey<World> to) {
+        if (run == RunStage.ARRIVED && from == World.NETHER && to == World.OVERWORLD) {
+            double d = Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0);
+            if (d > exitTolerance.get()) {
+                run = RunStage.NONE;
+                warning("You came out of the portal too far from the run's point - the run is void. Start another.");
+            } else {
+                run = RunStage.OVERWORLD;
+                info("In the overworld at the run's point. Fly around; the first dungeon the mod sees becomes yours.");
+            }
+        } else if (run != RunStage.NONE && !(run == RunStage.FLYING && to == World.NETHER)) {
+            run = RunStage.NONE;
+            spawner = null;
+            warning("Dimension changed mid-run - the run is void.");
+        }
+    }
+
+    /** A dungeon spawner: sits on cobblestone/mossy floor. Mineshaft and fortress spawners don't. */
+    private BlockPos nearestDungeonSpawner() {
+        int pcx = mc.player.getChunkPos().x, pcz = mc.player.getChunkPos().z;
+        BlockPos best = null; double bestD = Double.MAX_VALUE;
+        for (int cx = pcx - 8; cx <= pcx + 8; cx++) for (int cz = pcz - 8; cz <= pcz + 8; cz++) {
+            if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
+            WorldChunk chunk = mc.world.getChunk(cx, cz);
+            for (Map.Entry<BlockPos, BlockEntity> e : chunk.getBlockEntities().entrySet()) {
+                if (!(e.getValue() instanceof MobSpawnerBlockEntity)) continue;
+                BlockPos p = e.getKey();
+                var below = mc.world.getBlockState(p.down());
+                if (!below.isOf(Blocks.COBBLESTONE) && !below.isOf(Blocks.MOSSY_COBBLESTONE)) continue;
+                double d = p.getSquaredDistance(mc.player.getPos());
+                if (d < bestD) { bestD = d; best = p.toImmutable(); }
+            }
+        }
+        return best;
+    }
+
+    /** Relative guidance only: bearing words, distance, depth. Never a coordinate. */
+    private String arrow() {
+        if (spawner == null || mc.player == null) return "";
+        double dx = spawner.getX() + 0.5 - mc.player.getX(), dz = spawner.getZ() + 0.5 - mc.player.getZ();
+        double dist = Math.hypot(dx, dz);
+        double bearing = Math.toDegrees(Math.atan2(-dx, dz));                 // minecraft yaw convention
+        double rel = ((bearing - mc.player.getYaw()) % 360 + 540) % 360 - 180;   // -180..180, 0 = straight ahead
+        String dir = Math.abs(rel) < 22 ? "ahead" : Math.abs(rel) > 158 ? "behind" : rel > 0 ? (rel < 68 ? "ahead-right" : rel < 112 ? "right" : "behind-right") : (rel > -68 ? "ahead-left" : rel > -112 ? "left" : "behind-left");
+        int dy = spawner.getY() - mc.player.getBlockPos().getY();
+        return String.format("dungeon %s, %dm, %s", dir, (int) dist, dy < -1 ? (-dy) + " down" : dy > 1 ? dy + " up" : "level");
     }
 
     // ------------------------------------------------------------------ code, hash, record, sync
@@ -318,11 +485,14 @@ public class QuillHider extends Module {
     /** round,number,hash,unix-seconds,synced - and nothing else, ever. */
     private void record() {
         long now = System.currentTimeMillis() / 1000;
-        String line = round.get() + "," + pendingNumber + "," + pendingHash + "," + now + ",0";
+        boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
+        String line = round.get() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0);
+        run = RunStage.NONE;
+        spawner = null;
         try {
             Files.writeString(hidesFile().toPath(), line + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception e) { error("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
-        info("%s hidden. Hash %s… recorded.", pendingTitle, pendingHash.substring(0, 10));
+        info("%s hidden%s. Hash %s… recorded. Pearl home.", pendingTitle, blindRun ? " at the end of a blind run" : "", pendingHash.substring(0, 10));
         final int r = round.get(), n = pendingNumber; final String hsh = pendingHash;
         pendingHash = null;
         new Thread(() -> { if (post(r, n, hsh, now)) { markSynced(hsh); info("Hash posted to the site."); } else info("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
@@ -332,7 +502,7 @@ public class QuillHider extends Module {
         String url = siteUrl.get().trim();
         if (url.isEmpty() || apiKey.get().isEmpty()) return false;
         try {
-            String body = String.format("{\"round\":%d,\"number\":%d,\"hash\":\"%s\",\"ts\":%d}", r, n, hash, ts);
+            String body = String.format("{\"round\":%d,\"number\":%d,\"hash\":\"%s\",\"ts\":%d}", r, n, hash, ts);   // blind flag rides in the file; the site learns it on sync v2
             HttpRequest req = HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/hide"))
                 .timeout(Duration.ofSeconds(15))
                 .header("Content-Type", "application/json")
