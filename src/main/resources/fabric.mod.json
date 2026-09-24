@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "quillcoin-hider",
+  "version": "${version}",
+  "name": "QuillCoin Hider",
+  "description": "The tool the QuillCoin account uses to hide coins: writes and signs a book with a random code, hashes the code, drops the book into the open chest, and never shows the code to the person holding the mouse.",
+  "authors": ["QuillCoin"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "meteor": ["gg.quillcoin.hider.QuillHiderAddon"] },
+  "custom": { "meteor-client:color": "230,200,90" },
+  "depends": { "java": ">=21", "minecraft": ["${mc_version}"], "meteor-client": "*" }
+}
