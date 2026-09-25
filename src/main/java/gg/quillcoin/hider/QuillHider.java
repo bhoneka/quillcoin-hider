@@ -22,6 +22,8 @@ import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
 import baritone.api.BaritoneAPI;
 import baritone.api.pathing.goals.GoalXZ;
+import baritone.api.pathing.goals.GoalNear;
+import meteordevelopment.meteorclient.events.render.TooltipDataEvent;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
@@ -120,11 +122,17 @@ public class QuillHider extends Module {
         .name("exit-tolerance").description("If you come out of the portal farther than this (overworld blocks) from the run's point, the run is void.").defaultValue(2500).min(200).sliderMax(20000).build());
     private final Setting<Integer> groundView = sgRun.add(new IntSetting.Builder()
         .name("ground-view-distance").description("Render distance (chunks) while you are on the ground in the overworld part of a run: enough to fight and dig, not enough to recognise the area. Restored when the run ends.").defaultValue(2).min(2).sliderMax(8).build());
+    private final Setting<Integer> returnDistance = sgRun.add(new IntSetting.Builder()
+        .name("return-distance").description("After the stash the screen stays dark and locked until you are this far (blocks) from the chest, or in another dimension. Only then is the hash posted.").defaultValue(3000).min(200).sliderMax(50000).build());
     private final Setting<Integer> dungeonRadius = sgRun.add(new IntSetting.Builder()
         .name("dungeon-radius").description("You must be within this many blocks of the run's spawner to stash.").defaultValue(10).min(4).sliderMax(24).build());
 
     /** NONE -> FLYING (nether, Baritone) -> ARRIVED (build a portal) -> OVERWORLD (fly, find a spawner) -> DESIGNATED (stash allowed here) */
-    private enum RunStage { NONE, FLYING, ARRIVED, OVERWORLD, DESIGNATED }
+    private enum RunStage { NONE, FLYING, ARRIVED, OVERWORLD, DESIGNATED, RETURNING }
+    private double stashX, stashZ;                                    // where the book went - lives here until you are far away, then gone
+    private int pendingRound, pendingNum; private String pendingHashForPost; private long pendingTs;
+    private boolean revealed;
+    private Boolean savedBreak, savedPlace;
     private RunStage run = RunStage.NONE;
     private int targetNX, targetNZ;                                   // the run's point, nether coords - lives here and nowhere else
     private BlockPos spawner;                                         // the run's dungeon
@@ -156,6 +164,8 @@ public class QuillHider extends Module {
     public void onDeactivate() {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
         if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; }
+        groundDriving(false);
+        if (run == RunStage.RETURNING) audit("module switched off before leaving the chest - hash posts on next resync");
         restoreView();
         restoreAutoJump();
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
@@ -293,7 +303,8 @@ public class QuillHider extends Module {
         // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
         // while a run is live or the screen is covered, the HUD is simply off. It comes back when the run ends.
         if (run != RunStage.FLYING && savedAutoJump != null) restoreAutoJump();
-        boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED;
+        boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED || run == RunStage.RETURNING;
+        if (run != RunStage.OVERWORLD && run != RunStage.DESIGNATED && savedBreak != null) groundDriving(false);
         if (onGroundPhase && savedView == -1) shrinkView();
         else if (!onGroundPhase && savedView != -1) restoreView();
         boolean wantHudOff = run != RunStage.NONE;
@@ -345,6 +356,11 @@ public class QuillHider extends Module {
 
     // ------------------------------------------------------------------ never show a coin
 
+    @EventHandler(priority = EventPriority.LOWEST - 1000)
+    private void onTooltipData(TooltipDataEvent event) {
+        if (isCoinBook(event.itemStack)) event.tooltipData = null;        // Meteor's Better Tooltips previews book pages here
+    }
+
     @EventHandler
     private void onTooltip(ItemStackTooltipEvent event) {
         if (!isCoinBook(event.itemStack())) return;
@@ -380,7 +396,11 @@ public class QuillHider extends Module {
         int fw = mc.getWindow().getFramebufferWidth(), fh = mc.getWindow().getFramebufferHeight();
         int sw = Math.max(1, mc.getWindow().getScaledWidth()), sh = Math.max(1, mc.getWindow().getScaledHeight());
         float sx = fw / (float) sw, sy = fh / (float) sh;
-        boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding();
+        boolean covered = blind.get() && (
+            (run == RunStage.FLYING && mc.player.isGliding())
+            || run == RunStage.OVERWORLD
+            || (run == RunStage.DESIGNATED && !revealed)
+            || run == RunStage.RETURNING);
         if (covered) event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);       // belt and braces: whatever the projection, it's black
         event.drawContext.getMatrices().push();
         event.drawContext.getMatrices().scale(sx, sy, 1f);
@@ -388,13 +408,19 @@ public class QuillHider extends Module {
             int rockets = 0;
             for (int i = 0; i < 36; i++) { ItemStack s = mc.player.getInventory().getStack(i); if (s.isOf(Items.FIREWORK_ROCKET)) rockets += s.getCount(); }
             int cx = sw / 2, cy = sh / 2;
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
-            double left = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
-            double spd = Math.hypot(mc.player.getVelocity().x, mc.player.getVelocity().z) * 20;
-            String eta = spd > 5 ? "about " + Math.max(1, (int) Math.ceil(left / spd / 60)) + " min" : "…";   // minutes only: no metres, no speed, no direction
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, eta, cx, cy + 4, 0xFFFFFFFF);
+            String big = run == RunStage.FLYING ? "FLYING" : run == RunStage.RETURNING ? "STASHED" : run == RunStage.DESIGNATED ? "TO THE DUNGEON" : "LOOKING";
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, big, cx, cy - 10, 0xFFFFFFFF);
+            String sub;
+            if (run == RunStage.FLYING) {
+                double left = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
+                double spd = Math.hypot(mc.player.getVelocity().x, mc.player.getVelocity().z) * 20;
+                sub = spd > 5 ? "about " + Math.max(1, (int) Math.ceil(left / spd / 60)) + " min" : "…";   // minutes only: no metres, no speed, no direction
+            } else if (run == RunStage.RETURNING) sub = "pearl or tp away - the hash posts when you're gone";
+            else if (run == RunStage.DESIGNATED) sub = arrow();
+            else sub = "baritone is searching for a dungeon";
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, sub, cx, cy + 4, 0xFFFFFFFF);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 16, 0xFFAAAAAA);
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 28, 0xFF666666);
+            if (run == RunStage.FLYING) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 28, 0xFF666666);
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: take off (" + runKey.get() + " to resume)"
@@ -561,19 +587,44 @@ public class QuillHider extends Module {
             case OVERWORLD -> {
                 if (dim != World.OVERWORLD || tick - lastScan < 20) return;
                 lastScan = tick;
+                groundDriving(true);
                 BlockPos found = nearestDungeonSpawner();
                 if (found != null) {
                     spawner = found;
+                    revealed = false;
                     run = RunStage.DESIGNATED;
                     audit("dungeon designated");
-                    say("Dungeon found. Follow the arrow, dig down, put the blocks back, and stash there.");
+                    say("Dungeon found. Baritone is taking you there - the screen stays dark until you're inside.");
+                    pathToSpawner();
+                } else if (!pathing()) {
+                    double a = RNG.nextDouble() * Math.PI * 2;                     // nothing in range: wander 200 blocks in a random direction
+                    try { BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalXZ((int) (mc.player.getX() + 200 * Math.cos(a)), (int) (mc.player.getZ() + 200 * Math.sin(a)))); } catch (Throwable ignored) { }
+                    feed("no dungeon in range - wandering");
                 }
+            }
+            case DESIGNATED -> {
+                if (dim != World.OVERWORLD || spawner == null) return;
+                boolean inside = mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get());
+                if (inside && !revealed) {
+                    revealed = true;
+                    try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
+                    groundDriving(false);
+                    audit("in the dungeon");
+                    say("You're in the dungeon. Open the chest and press %s.", stashKey.get());
+                } else if (!inside && !revealed && !pathing() && tick % 100 == 0) {
+                    pathToSpawner();                                               // Baritone stopped short: send it again
+                }
+            }
+            case RETURNING -> {
+                double d = Math.hypot(mc.player.getX() - stashX, mc.player.getZ() - stashZ);
+                if (d > returnDistance.get()) finishReturn("far from the chest");
             }
             default -> {}
         }
     }
 
     private void onDimensionChange(RegistryKey<World> from, RegistryKey<World> to) {
+        if (run == RunStage.RETURNING) { finishReturn("dimension change"); return; }
         if (run == RunStage.ARRIVED && from == World.NETHER && to == World.OVERWORLD) {
             double d = Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0);
             if (d > exitTolerance.get()) {
@@ -596,6 +647,41 @@ public class QuillHider extends Module {
             spawner = null;
             warn("Left the nether mid-flight - the run is void.");
         }
+    }
+
+    private boolean pathing() {
+        try { return BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().isPathing(); } catch (Throwable t) { return false; }
+    }
+
+    private void pathToSpawner() {
+        try { BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(spawner, 2)); } catch (Throwable ignored) { }
+    }
+
+    /** Baritone may dig on the way to the dungeon; the settings go back afterwards. */
+    private void groundDriving(boolean on) {
+        try {
+            if (on) {
+                if (savedBreak == null) { savedBreak = BaritoneAPI.getSettings().allowBreak.value; savedPlace = BaritoneAPI.getSettings().allowPlace.value; }
+                BaritoneAPI.getSettings().allowBreak.value = true;
+                BaritoneAPI.getSettings().allowPlace.value = true;
+            } else if (savedBreak != null) {
+                BaritoneAPI.getSettings().allowBreak.value = savedBreak;
+                BaritoneAPI.getSettings().allowPlace.value = savedPlace;
+                savedBreak = null; savedPlace = null;
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** The run's last leg: dark and locked until you are away from the chest. Only then does the hash reach the site. */
+    private void finishReturn(String how) {
+        audit("away from the stash (" + how + ") - posting the hash");
+        run = RunStage.NONE;
+        spawner = null;
+        stashX = stashZ = 0;
+        final int r = pendingRound, n = pendingNum; final String hsh = pendingHashForPost; final long ts = pendingTs;
+        pendingHashForPost = null;
+        say("Away from the chest. Posting the hash now.");
+        if (hsh != null) new Thread(() -> { if (post(r, n, hsh, ts)) { markSynced(hsh); say("Hash posted - the coin is live on the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
     }
 
     /** A dungeon spawner: sits on cobblestone/mossy floor. Mineshaft and fortress spawners don't. */
@@ -683,15 +769,16 @@ public class QuillHider extends Module {
         boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
         audit("stashed " + pendingTitle + (blindRun ? " at the end of a blind run" : " WITHOUT a blind run"));
         String line = round.get() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0);
-        run = RunStage.NONE;
+        stashX = mc.player.getX(); stashZ = mc.player.getZ();
         spawner = null;
+        revealed = false;
+        run = RunStage.RETURNING;                                                 // dark and locked until you're gone
         try {
             Files.writeString(hidesFile().toPath(), line + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception e) { fail("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
-        say("%s hidden%s. Hash %s… recorded. Pearl home.", pendingTitle, blindRun ? " at the end of a blind run" : "", pendingHash.substring(0, 10));
-        final int r = round.get(), n = pendingNumber; final String hsh = pendingHash;
+        say("%s hidden%s. Now pearl or tp away - the screen stays dark and the hash posts once you're %d blocks from here.", pendingTitle, blindRun ? " at the end of a blind run" : "", returnDistance.get());
+        pendingRound = round.get(); pendingNum = pendingNumber; pendingHashForPost = pendingHash; pendingTs = now;
         pendingHash = null;
-        new Thread(() -> { if (post(r, n, hsh, now)) { markSynced(hsh); say("Hash posted to the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
     }
 
     private boolean post(int r, int n, String hash, long ts) {
