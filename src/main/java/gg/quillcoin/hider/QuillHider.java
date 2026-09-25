@@ -109,6 +109,8 @@ public class QuillHider extends Module {
         .name("min-ow-radius").description("Closest the random point may be to 0,0 - in OVERWORLD blocks.").defaultValue(15000).min(0).sliderMax(1000000).build());
     private final Setting<Integer> maxRadius = sgRun.add(new IntSetting.Builder()
         .name("max-ow-radius").description("Farthest the random point may be from 0,0 - in OVERWORLD blocks (nether flight is an eighth of it).").defaultValue(100000).min(1000).sliderMax(5000000).build());
+    private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
+        .name("test-distance").description("TESTING ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
         .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
@@ -421,14 +423,21 @@ public class QuillHider extends Module {
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
         // uniform over the ring between min and max overworld radius, then scaled to the nether
         double a = RNG.nextDouble() * Math.PI * 2;
-        double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
-        double r = Math.sqrt(lo * lo + RNG.nextDouble() * (hi * hi - lo * lo));
-        targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
-        targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
+        boolean test = testRadius.get() > 0;
+        if (test) {
+            double r = testRadius.get() * (0.8 + RNG.nextDouble() * 0.4);
+            targetNX = (int) Math.round(mc.player.getX() + r * Math.cos(a));
+            targetNZ = (int) Math.round(mc.player.getZ() + r * Math.sin(a));
+        } else {
+            double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
+            double r = Math.sqrt(lo * lo + RNG.nextDouble() * (hi * hi - lo * lo));
+            targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
+            targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
+        }
         spawner = null;
         elytraWasActive = false;
         run = RunStage.FLYING;
-        audit("run started");
+        audit(test ? "run started (TEST: point near the player)" : "run started");
         fly();
         info("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
         feed("blind run started");
