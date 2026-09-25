@@ -83,7 +83,7 @@ public class QuillHider extends Module {
     private final Setting<String> author = sgGeneral.add(new StringSetting.Builder()
         .name("author").description("The official account. The module refuses to hide unless you are logged in as it.").defaultValue("QuillCoin").build());
     private final Setting<Integer> round = sgGeneral.add(new IntSetting.Builder()
-        .name("round").description("Round number written into the book title (R1 Coin 37).").defaultValue(1).min(1).sliderMax(50).build());
+        .name("round").description("Round number written into the book title (R1 Coin 37). Use 0 for tests - the site ignores round 0.").defaultValue(1).min(0).sliderMax(50).build());
     private final Setting<Integer> numbersPerRound = sgGeneral.add(new IntSetting.Builder()
         .name("numbers-per-round").description("Coin numbers are drawn at random from 1..this, so the number never reveals the hiding order.").defaultValue(1000).min(10).sliderMax(100000).build());
     private final Setting<String> siteUrl = sgGeneral.add(new StringSetting.Builder()
@@ -97,6 +97,8 @@ public class QuillHider extends Module {
         .name("blind").description("Paint the screen over while gliding and keep F3 off.").defaultValue(true).build());
     private final Setting<Keybind> peekKey = sgBlind.add(new KeybindSetting.Builder()
         .name("peek-key").description("Hold to see the screen while gliding.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_LEFT_ALT)).build());
+    private final Setting<Boolean> feed = sgBlind.add(new BoolSetting.Builder()
+        .name("debug-feed").description("Show the last few things the mod did, bottom right, even over the dark screen. Never a coordinate.").defaultValue(true).build());
     private final Setting<Integer> damageReveal = sgBlind.add(new IntSetting.Builder()
         .name("damage-reveal").description("Ticks the screen stays visible after you take damage, so you can deal with it.").defaultValue(200).min(0).sliderMax(1200).build());
 
@@ -123,6 +125,12 @@ public class QuillHider extends Module {
     private BlockPos spawner;                                         // the run's dungeon
     private RegistryKey<World> lastDim;
     private long lastScan;
+
+    private final java.util.ArrayDeque<String> feedLines = new java.util.ArrayDeque<>();
+    private void feed(String s) { feedLines.addLast(s); while (feedLines.size() > 8) feedLines.removeFirst(); }
+    private void say(String fmt, Object... a) { String m = String.format(fmt, a); info(m); feed(m); }
+    private void warn(String fmt, Object... a) { String m = String.format(fmt, a); warning(m); feed("! " + m); }
+    private void fail(String fmt, Object... a) { String m = String.format(fmt, a); error(m); feed("X " + m); }
 
     private enum Stage { IDLE, SIGNING, STASHING, RETRY }
     private Stage stage = Stage.IDLE;
@@ -161,38 +169,38 @@ public class QuillHider extends Module {
         if (!stashKey.get().matches(true, event.key, event.modifiers)) return;
         event.cancel();
         if (stage == Stage.RETRY) { retryStash(); return; }
-        if (stage != Stage.IDLE) { info("Busy (%s).", stage.name().toLowerCase()); return; }
+        if (stage != Stage.IDLE) { say("Busy (%s).", stage.name().toLowerCase()); return; }
         stash();
     }
 
     private void stash() {
         if (!(mc.currentScreen instanceof HandledScreen<?> hs) || !(hs.getScreenHandler() instanceof GenericContainerScreenHandler handler)) {
-            error("Open the dungeon chest first, then press the key."); return;
+            fail("Open the dungeon chest first, then press the key."); return;
         }
         String me = mc.getSession() == null ? "" : mc.getSession().getUsername();
-        if (!me.equals(author.get())) { error("You are %s, not %s - not hiding.", me, author.get()); return; }
+        if (!me.equals(author.get())) { fail("You are %s, not %s - not hiding.", me, author.get()); return; }
         if (requireRun.get()) {
-            if (run != RunStage.DESIGNATED || spawner == null) { error("No blind run brought you here. Press %s in the nether first.", runKey.get()); return; }
-            if (!mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get())) { error("This isn't the run's dungeon. Follow the arrow."); return; }
+            if (run != RunStage.DESIGNATED || spawner == null) { fail("No blind run brought you here. Press %s in the nether first.", runKey.get()); return; }
+            if (!mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get())) { fail("This isn't the run's dungeon. Follow the arrow."); return; }
         }
         for (String logger : new String[]{"chest-dump", "stash-audit", "net-worth", "layer-kit"}) {
             Module m = Modules.get().get(logger);
-            if (m != null && m.isActive()) { error("%s is on - it logs chest contents. Turn it off first.", m.title); return; }
+            if (m != null && m.isActive()) { fail("%s is on - it logs chest contents. Turn it off first.", m.title); return; }
         }
         if (!warnedMaps && (FabricLoader.getInstance().isModLoaded("xaerominimap") || FabricLoader.getInstance().isModLoaded("xaeroworldmap"))) {
             warnedMaps = true;
-            warning("This instance has Xaero maps installed. Blind flight can't cover them - the hider instance should have no map mods.");
+            warn("This instance has Xaero maps installed. Blind flight can't cover them - the hider instance should have no map mods.");
         }
         int slot = -1;
         for (int i = 0; i < 9; i++) if (mc.player.getInventory().getStack(i).isOf(Items.WRITABLE_BOOK)) { slot = i; break; }
-        if (slot == -1) { error("No book-and-quill in your hotbar."); return; }
+        if (slot == -1) { fail("No book-and-quill in your hotbar."); return; }
         Inventory chest = handler.getInventory();
         boolean room = false;
         for (int i = 0; i < chest.size(); i++) if (chest.getStack(i).isEmpty()) { room = true; break; }
-        if (!room) { error("That chest is full."); return; }
+        if (!room) { fail("That chest is full."); return; }
 
         int number = drawNumber();
-        if (number == -1) { error("Every number in this round is used - raise numbers-per-round."); return; }
+        if (number == -1) { fail("Every number in this round is used - raise numbers-per-round."); return; }
         String code = makeCode();
         String title = "R" + round.get() + " Coin " + number;
         List<String> pages = List.of(
@@ -205,17 +213,18 @@ public class QuillHider extends Module {
         pendingTitle = title;
         pendingSlot = slot;
         mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(slot, pages, Optional.of(title)));
+        feed("code made + hashed, asking the server to sign");
         stage = Stage.SIGNING;
         stageSince = tick;
     }
 
     private void retryStash() {
         if (!(mc.currentScreen instanceof HandledScreen<?> hs) || !(hs.getScreenHandler() instanceof GenericContainerScreenHandler handler)) {
-            error("Open a chest, then press the key to stash the signed book."); return;
+            fail("Open a chest, then press the key to stash the signed book."); return;
         }
         int slot = -1;
         for (int i = 0; i < 9; i++) if (isCoinBook(mc.player.getInventory().getStack(i))) { slot = i; break; }
-        if (slot == -1) { stage = Stage.IDLE; error("No signed coin book in the hotbar any more."); return; }
+        if (slot == -1) { stage = Stage.IDLE; fail("No signed coin book in the hotbar any more."); return; }
         pendingSlot = slot;
         quickMove(handler, slot);
         stage = Stage.STASHING;
@@ -243,17 +252,19 @@ public class QuillHider extends Module {
             case SIGNING -> {
                 ItemStack st = mc.player.getInventory().getStack(pendingSlot);
                 if (isCoinBook(st)) {
+                    feed("server signed the book");
                     if (mc.currentScreen instanceof HandledScreen<?> hs && hs.getScreenHandler() instanceof GenericContainerScreenHandler handler) {
                         quickMove(handler, pendingSlot);
+                        feed("moving it into the chest");
                         stage = Stage.STASHING;
                         stageSince = tick;
                     } else {
                         stage = Stage.RETRY;
-                        warning("Book signed but the chest closed. Open a chest and press the key - and do not open the book.");
+                        warn("Book signed but the chest closed. Open a chest and press the key - and do not open the book.");
                     }
                 } else if (tick - stageSince > 60) {
                     stage = Stage.IDLE;
-                    error("The server didn't sign the book. Nothing was hidden; the number is free again.");
+                    fail("The server didn't sign the book. Nothing was hidden; the number is free again.");
                 }
             }
             case STASHING -> {
@@ -264,7 +275,7 @@ public class QuillHider extends Module {
                     if (mc.currentScreen instanceof HandledScreen<?>) mc.player.closeHandledScreen();
                 } else if (tick - stageSince > 40) {
                     stage = Stage.RETRY;
-                    warning("The signed book is still in your hotbar (chest full?). Open a chest with room and press the key. Do not open the book.");
+                    warn("The signed book is still in your hotbar (chest full?). Open a chest with room and press the key. Do not open the book.");
                 }
             }
             default -> {}
@@ -291,7 +302,7 @@ public class QuillHider extends Module {
         if (!(event.screen instanceof BookScreen) || mc.player == null) return;
         if (isCoinBook(mc.player.getMainHandStack()) || isCoinBook(mc.player.getOffHandStack())) {
             event.cancel();
-            warning("That's a coin book. Not showing it.");
+            warn("That's a coin book. Not showing it.");
         }
     }
 
@@ -320,19 +331,32 @@ public class QuillHider extends Module {
         event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "hold " + peekKey.get() + " to peek", cx, cy + 16, 0xFF666666);
     }
 
+    @EventHandler(priority = EventPriority.LOWEST - 1)
+    private void onRenderFeed(Render2DEvent event) {
+        if (!feed.get() || mc.player == null) return;
+        int y = event.screenHeight - 10 - feedLines.size() * 10;
+        String head = "quill " + run.name().toLowerCase() + " / " + stage.name().toLowerCase();
+        event.drawContext.drawTextWithShadow(mc.textRenderer, head, event.screenWidth - 6 - mc.textRenderer.getWidth(head), y - 12, 0xFFE6C85A);
+        for (String l : feedLines) {
+            String t = l.length() > 60 ? l.substring(0, 59) + "…" : l;
+            event.drawContext.drawTextWithShadow(mc.textRenderer, t, event.screenWidth - 6 - mc.textRenderer.getWidth(t), y, 0xFFCCCCCC);
+            y += 10;
+        }
+    }
+
     // ------------------------------------------------------------------ the blind run
 
     private void startOrResumeRun() {
-        if (mc.world == null || mc.world.getRegistryKey() != World.NETHER) { error("Blind runs start in the nether."); return; }
+        if (mc.world == null || mc.world.getRegistryKey() != World.NETHER) { fail("Blind runs start in the nether."); return; }
         String me = mc.getSession() == null ? "" : mc.getSession().getUsername();
-        if (!me.equals(author.get())) { error("You are %s, not %s.", me, author.get()); return; }
-        try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { error("Baritone isn't installed."); return; }
+        if (!me.equals(author.get())) { fail("You are %s, not %s.", me, author.get()); return; }
+        try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { fail("Baritone isn't installed."); return; }
         if (run == RunStage.FLYING) {
             fly();
-            info("Resuming the run. Take off.");
+            say("Resuming the run. Take off.");
             return;
         }
-        if (run != RunStage.NONE) { info("A run is already in progress (%s).", run.name().toLowerCase()); return; }
+        if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
         // uniform over the ring between min and max overworld radius, then scaled to the nether
         double a = RNG.nextDouble() * Math.PI * 2;
         double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
@@ -342,7 +366,7 @@ public class QuillHider extends Module {
         spawner = null;
         run = RunStage.FLYING;
         fly();
-        info("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
+        say("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
     }
 
     private void fly() {
@@ -350,7 +374,7 @@ public class QuillHider extends Module {
             GoalXZ g = new GoalXZ(targetNX, targetNZ);
             BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoal(g);
             BaritoneAPI.getProvider().getPrimaryBaritone().getElytraProcess().pathTo(g);
-        } catch (Throwable t) { error("Couldn't hand the goal to Baritone: %s", t.getMessage()); run = RunStage.NONE; }
+        } catch (Throwable t) { fail("Couldn't hand the goal to Baritone: %s", t.getMessage()); run = RunStage.NONE; }
     }
 
     private boolean elytraActive() {
@@ -367,9 +391,9 @@ public class QuillHider extends Module {
                 double d = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
                 if (d <= arriveRadius.get() && !mc.player.isGliding()) {
                     run = RunStage.ARRIVED;
-                    info("Arrived. Make a portal here and go through it - the run continues in the overworld.");
+                    say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
                 } else if (!elytraActive() && !mc.player.isGliding() && tick % 100 == 0) {
-                    info("Baritone isn't flying. Press %s to resume the run.", runKey.get());
+                    say("Baritone isn't flying. Press %s to resume the run.", runKey.get());
                 }
             }
             case OVERWORLD -> {
@@ -379,7 +403,7 @@ public class QuillHider extends Module {
                 if (found != null) {
                     spawner = found;
                     run = RunStage.DESIGNATED;
-                    info("Dungeon found. Follow the arrow, dig down, put the blocks back, and stash there.");
+                    say("Dungeon found. Follow the arrow, dig down, put the blocks back, and stash there.");
                 }
             }
             default -> {}
@@ -391,15 +415,22 @@ public class QuillHider extends Module {
             double d = Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0);
             if (d > exitTolerance.get()) {
                 run = RunStage.NONE;
-                warning("You came out of the portal too far from the run's point - the run is void. Start another.");
+                warn("You came out of the portal too far from the run's point - the run is void. Start another.");
             } else {
                 run = RunStage.OVERWORLD;
-                info("In the overworld at the run's point. Fly around; the first dungeon the mod sees becomes yours.");
+                say("In the overworld at the run's point. Fly around; the first dungeon the mod sees becomes yours.");
             }
-        } else if (run != RunStage.NONE && !(run == RunStage.FLYING && to == World.NETHER)) {
+        } else if ((run == RunStage.OVERWORLD || run == RunStage.DESIGNATED) && to == World.OVERWORLD) {
+            // back in the overworld after a portal / bed / respawn dance: still fine as long as you are near the point
+            double d = Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0);
+            if (d > exitTolerance.get()) { run = RunStage.NONE; spawner = null; warn("You're back in the overworld far from the run's point - the run is void."); }
+            else feed("back in the overworld near the point - run continues");
+        } else if ((run == RunStage.OVERWORLD || run == RunStage.DESIGNATED) && to == World.NETHER) {
+            feed("in the nether - run paused until you're back in the overworld");
+        } else if (run == RunStage.FLYING && to != World.NETHER) {
             run = RunStage.NONE;
             spawner = null;
-            warning("Dimension changed mid-run - the run is void.");
+            warn("Left the nether mid-flight - the run is void.");
         }
     }
 
@@ -491,11 +522,11 @@ public class QuillHider extends Module {
         spawner = null;
         try {
             Files.writeString(hidesFile().toPath(), line + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (Exception e) { error("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
-        info("%s hidden%s. Hash %s… recorded. Pearl home.", pendingTitle, blindRun ? " at the end of a blind run" : "", pendingHash.substring(0, 10));
+        } catch (Exception e) { fail("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
+        say("%s hidden%s. Hash %s… recorded. Pearl home.", pendingTitle, blindRun ? " at the end of a blind run" : "", pendingHash.substring(0, 10));
         final int r = round.get(), n = pendingNumber; final String hsh = pendingHash;
         pendingHash = null;
-        new Thread(() -> { if (post(r, n, hsh, now)) { markSynced(hsh); info("Hash posted to the site."); } else info("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
+        new Thread(() -> { if (post(r, n, hsh, now)) { markSynced(hsh); say("Hash posted to the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
     }
 
     private boolean post(int r, int n, String hash, long ts) {
@@ -534,7 +565,7 @@ public class QuillHider extends Module {
                 if (p.length < 5 || !p[4].trim().equals("0")) continue;
                 if (post(Integer.parseInt(p[0].trim()), Integer.parseInt(p[1].trim()), p[2].trim(), Long.parseLong(p[3].trim()))) { markSynced(p[2].trim()); sent++; }
             }
-            if (sent > 0) info("Posted %d hash%s that were waiting.", sent, sent == 1 ? "" : "es");
+            if (sent > 0) say("Posted %d hash%s that were waiting.", sent, sent == 1 ? "" : "es");
         } catch (Exception ignored) { }
     }
 }
