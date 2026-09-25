@@ -15,6 +15,7 @@ import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.hud.Hud;
+import meteordevelopment.meteorclient.gui.WidgetScreen;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
@@ -156,6 +157,7 @@ public class QuillHider extends Module {
     public void onDeactivate() {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
         restoreView();
+        restoreAutoJump();
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE;
         spawner = null;
@@ -179,6 +181,12 @@ public class QuillHider extends Module {
         savedView = mc.options.getViewDistance().getValue();
         mc.options.getViewDistance().setValue(groundView.get());
         feed("view pulled in to " + groundView.get() + " chunks");
+    }
+
+    private void restoreAutoJump() {
+        if (savedAutoJump == null) return;
+        try { BaritoneAPI.getSettings().elytraAutoJump.value = savedAutoJump; } catch (Throwable ignored) { }
+        savedAutoJump = null;
     }
 
     private void restoreView() {
@@ -288,6 +296,7 @@ public class QuillHider extends Module {
         if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
         // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
         // while a run is live or the screen is covered, the HUD is simply off. It comes back when the run ends.
+        if (run != RunStage.FLYING && savedAutoJump != null) restoreAutoJump();
         boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED;
         if (onGroundPhase && savedView == -1) shrinkView();
         else if (!onGroundPhase && savedView != -1) restoreView();
@@ -351,7 +360,14 @@ public class QuillHider extends Module {
 
     @EventHandler
     private void onOpenScreen(OpenScreenEvent event) {
-        if (!(event.screen instanceof BookScreen) || mc.player == null) return;
+        if (mc.player == null) return;
+        if (event.screen instanceof WidgetScreen && (run != RunStage.NONE || (blind.get() && mc.player.isGliding()))) {
+            event.cancel();
+            audit("meteor gui blocked during the run");
+            warn("Meteor's GUI is locked while a run is live.");
+            return;
+        }
+        if (!(event.screen instanceof BookScreen)) return;
         if (isCoinBook(mc.player.getMainHandStack()) || isCoinBook(mc.player.getOffHandStack())) {
             event.cancel();
             warn("That's a coin book. Not showing it.");
@@ -428,8 +444,12 @@ public class QuillHider extends Module {
         say("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
     }
 
+    private Boolean savedAutoJump;
+
     private void fly() {
         try {
+            if (savedAutoJump == null) savedAutoJump = BaritoneAPI.getSettings().elytraAutoJump.value;
+            BaritoneAPI.getSettings().elytraAutoJump.value = true;                 // Baritone jumps and deploys on its own
             GoalXZ g = new GoalXZ(targetNX, targetNZ);
             BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoal(g);
             BaritoneAPI.getProvider().getPrimaryBaritone().getElytraProcess().pathTo(g);
@@ -452,7 +472,7 @@ public class QuillHider extends Module {
                     run = RunStage.ARRIVED;
                     audit("arrived at the point after " + peeks + " peek(s)");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
-                } else if (!elytraActive() && !mc.player.isGliding() && tick % 100 == 0) {
+                } else if (!elytraActive() && !mc.player.isGliding() && tick % 600 == 0) {
                     say("Baritone isn't flying. Press %s to resume the run.", runKey.get());
                 }
             }

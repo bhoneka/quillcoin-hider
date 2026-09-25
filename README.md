@@ -33,7 +33,7 @@ The mod cannot stop the person running it from removing it - nothing on your own
 visible: `meteor-client/quillcoin-audit.txt` is an append-only log (no coordinates) of `module on`, `run started`, `arrived after N peeks`,
 `dungeon designated`, `stashed R1 Coin 37 at the end of a blind run` / `WITHOUT a blind run`, and every reason a run was voided
 (module switched off, blind flight turned off, portal exit too far, dimension change). It is published with each round next to the hash list.
-While a run is live or the screen is covered, Meteor's whole HUD is switched off (any element - Position, Waypoints - can be added in two clicks otherwise) and restored afterwards. The hider instance should carry nothing but Meteor, Baritone, performance mods and this addon - no map mods, no HUDs that print coordinates.
+While a run is live or the screen is covered, Meteor's GUI (click GUI, HUD editor, settings) cannot be opened and Meteor's whole HUD is switched off (any element - Position, Waypoints - can be added in two clicks otherwise) and restored afterwards. The hider instance should carry nothing but Meteor, Baritone, performance mods and this addon - no map mods, no HUDs that print coordinates.
 
 ## What it refuses
 - Hiding while logged in as anyone but the configured author.
