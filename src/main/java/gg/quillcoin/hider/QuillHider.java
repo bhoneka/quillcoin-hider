@@ -447,7 +447,11 @@ public class QuillHider extends Module {
         takeoffTries = 0;
         run = RunStage.FLYING;
         audit(test ? "run started (TEST: point near the player)" : "run started");
-        fly();
+        try {
+            if (savedAutoJump == null) savedAutoJump = BaritoneAPI.getSettings().elytraAutoJump.value;
+            BaritoneAPI.getSettings().elytraAutoJump.value = false;
+            BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoal(new GoalXZ(targetNX, targetNZ));   // goal only; pathTo once airborne
+        } catch (Throwable t) { fail("Couldn't hand the goal to Baritone: %s", t.getMessage()); run = RunStage.NONE; return; }
         info("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
         feed("blind run started");
     }
@@ -549,10 +553,10 @@ public class QuillHider extends Module {
                     elytraWasActive = false;
                     audit("flight ended before the point - run void");
                     warn("The flight ended before the point - the run is void. Press %s for a new one.", runKey.get());
-                } else if (!active && !elytraWasActive) {
+                } else if (!elytraWasActive && !(active && mc.player.isGliding())) {
                     takeoffTick();                                                       // we launch; Baritone steers once it's airborne
                 }
-                if (active) { elytraWasActive = true; if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; } }
+                if (active && mc.player.isGliding()) { elytraWasActive = true; if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; } }
             }
             case OVERWORLD -> {
                 if (dim != World.OVERWORLD || tick - lastScan < 20) return;
