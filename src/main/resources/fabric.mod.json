@@ -9,5 +9,6 @@
   "environment": "client",
   "entrypoints": { "meteor": ["gg.quillcoin.hider.QuillHiderAddon"] },
   "custom": { "meteor-client:color": "230,200,90" },
-  "depends": { "java": ">=21", "minecraft": ["${mc_version}"], "meteor-client": "*" }
+  "depends": { "java": ">=21", "minecraft": ["${mc_version}"], "meteor-client": "*" },
+  "mixins": ["quillcoin-hider.mixins.json"]
 }

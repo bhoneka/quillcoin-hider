@@ -22,10 +22,10 @@ With `require-blind-run` on (the default), the stash key only works at a dungeon
 1. In the nether, press the run key. Stopping the flight anywhere but the point (`,stop`, an emergency landing, no rockets) voids the run; the next press draws a new point. The mod picks a random point - uniform over the ring between `min-ow-radius` and `max-ow-radius` (overworld blocks), scaled to the nether - takes off by itself (nose up, hop, deploy, rocket - no ledge needed), then hands the goal to Baritone's elytra process through the API (nothing is printed). The black screen shows only an ETA in minutes. While gliding on this leg the screen is painted over with no peek and no exception; if you need to see, `,stop` - you land, you see, the run is void.
 2. Within `arrive-radius` of the point you land; the mod says to build a portal and go through.
 3. Coming out in the overworld, the mod checks you are within `exit-tolerance` of the point; farther, and the run is void.
-4. The screen stays dark. Baritone wanders until a dungeon spawner (one standing on cobblestone) is in range, then walks and digs you to it. The world appears only once you are inside the dungeon.
+4. Out of the portal, no block is drawn at all - sky, fluids and mobs only - until a dungeon spawner (one standing on cobblestone) is in range; then the run's dungeon is the ONLY thing drawn (x-ray style). You walk there, dig down, put your blocks back. Block entities outside the dungeon aren't drawn either. F3 is dead for the whole run.
 5. On the ground in the overworld the render distance is pulled in to `ground-view-distance` (2 chunks): enough to fight and dig, not enough to recognise the area. It is restored when the run ends.
 6. Within `dungeon-radius` of that spawner, with its chest open, the stash key works. The hides file records `blind=1`.
-7. After the stash the screen goes dark again and stays locked until you are `return-distance` blocks away or in another dimension (pearl home, or die). Only then is the hash posted - a coin is never live on the site while the hider is still standing at the chest.
+7. After the stash nothing is drawn again and everything stays locked until you are `return-distance` blocks away or in another dimension (pearl home, or die). Only then is the hash posted - a coin is never live on the site while the hider is still standing at the chest.
 
 The point, the spawner's position and your position never leave memory. Any dimension change other than the expected nether-to-overworld voids the run.
 
