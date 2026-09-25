@@ -73,6 +73,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.util.Base64;
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -263,6 +267,7 @@ public class QuillHider extends Module {
 
     private double stashX, stashZ;                                    // where the book went - lives here until you are far away, then gone
     private int pendingRound, pendingNum; private String pendingHashForPost; private long pendingTs; private boolean pendingBlind; private String pendingServer;
+    private String pendingLoc, pendingLocForPost;   // the chest position, AES-256-GCM under a key only the code can derive - never the plain coordinates
     /** Where https://quillcoin.gg (the default site-url) actually posts: the site itself is static. */
     private static final String API_BASE = "https://ovjeipprgkeygnlkraiu.supabase.co/functions/v1";
     private boolean revealed;
@@ -403,7 +408,8 @@ public class QuillHider extends Module {
             "This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins."
         );
         pendingHash = sha256(code);
-        code = null;                                                  // the code's whole life: made, written, hashed, gone
+        pendingLoc = sealLocation(code);                              // where we stand, readable by nobody until this code is redeemed
+        code = null;                                                  // the code's whole life: made, written, hashed, sealed, gone
         pendingNumber = number;
         pendingTitle = title;
         pendingSlot = slot;
@@ -829,10 +835,10 @@ public class QuillHider extends Module {
         broken.clear();
         spawner = null;
         stashX = stashZ = 0;
-        final int r = pendingRound, n = pendingNum; final String hsh = pendingHashForPost; final long ts = pendingTs; final boolean bl = pendingBlind; final String srv = pendingServer;
+        final int r = pendingRound, n = pendingNum; final String hsh = pendingHashForPost; final long ts = pendingTs; final boolean bl = pendingBlind; final String srv = pendingServer; final String loc = pendingLocForPost;
         pendingHashForPost = null;
         say("Away from the chest. Posting the hash now.");
-        if (hsh != null) new Thread(() -> { if (post(r, n, hsh, ts, bl, srv)) { markSynced(hsh); say("Hash posted - the coin is live on the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
+        if (hsh != null) new Thread(() -> { if (post(r, n, hsh, ts, bl, srv, loc)) { markSynced(hsh); say("Hash posted - the coin is live on the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
     }
 
     /** A dungeon spawner: sits on cobblestone/mossy floor. Mineshaft and fortress spawners don't. */
@@ -885,6 +891,21 @@ public class QuillHider extends Module {
         return sb.toString();                                         // QLL-XXXXX-XXXXX-XXXXX-XXXXX, 100 bits
     }
 
+    /** {"x","y","z"} of the player (at the chest), AES-256-GCM with key = SHA-256("quillcoin-loc:" + code), iv||ciphertext||tag, base64. The site stores it blind. */
+    private String sealLocation(String code) {
+        try {
+            BlockPos p = mc.player.getBlockPos();
+            byte[] key = MessageDigest.getInstance("SHA-256").digest(("quillcoin-loc:" + code).getBytes(StandardCharsets.UTF_8));
+            byte[] iv = new byte[12]; RNG.nextBytes(iv);
+            Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, iv));
+            byte[] ct = c.doFinal(("{\"x\":" + p.getX() + ",\"y\":" + p.getY() + ",\"z\":" + p.getZ() + "}").getBytes(StandardCharsets.UTF_8));
+            byte[] out = new byte[12 + ct.length];
+            System.arraycopy(iv, 0, out, 0, 12); System.arraycopy(ct, 0, out, 12, ct.length);
+            return Base64.getEncoder().encodeToString(out);
+        } catch (Exception e) { return ""; }
+    }
+
     private static String sha256(String s) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
@@ -915,12 +936,12 @@ public class QuillHider extends Module {
         return -1;
     }
 
-    /** round,number,hash,unix-seconds,synced,blind,server - and nothing else, ever. */
+    /** round,number,hash,unix-seconds,synced,blind,server,sealed-position - and nothing else, ever. */
     private void record() {
         long now = System.currentTimeMillis() / 1000;
         boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
         audit("stashed " + pendingTitle + (blindRun ? " at the end of a blind run" : " WITHOUT a blind run"));
-        String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName();
+        String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName() + "," + (pendingLoc == null ? "" : pendingLoc);
         stashX = mc.player.getX(); stashZ = mc.player.getZ();
         spawner = null;
         revealed = false;
@@ -929,7 +950,7 @@ public class QuillHider extends Module {
             Files.writeString(hidesFile().toPath(), line + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception e) { fail("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
         say("%s hidden%s. Now pearl or tp away - the screen stays dark and the hash posts once you're %d blocks from here.", pendingTitle, blindRun ? " at the end of a blind run" : "", returnDistance.get());
-        pendingRound = effectiveRound(); pendingNum = pendingNumber; pendingHashForPost = pendingHash; pendingTs = now; pendingBlind = blindRun; pendingServer = serverName();
+        pendingRound = effectiveRound(); pendingNum = pendingNumber; pendingHashForPost = pendingHash; pendingTs = now; pendingBlind = blindRun; pendingServer = serverName(); pendingLocForPost = pendingLoc; pendingLoc = null;
         pendingHash = null;
     }
 
@@ -952,12 +973,13 @@ public class QuillHider extends Module {
         } catch (Exception e) { return ""; }
     }
 
-    private boolean post(int r, int n, String hash, long ts, boolean blindRun, String server) {
+    private boolean post(int r, int n, String hash, long ts, boolean blindRun, String server, String loc) {
         String url = siteUrl.get().trim(), key = hiderKey();
         if (url.isEmpty() || key.isEmpty()) return false;
         if (url.replaceAll("/+$", "").endsWith("quillcoin.gg")) url = API_BASE;
         try {
-            String body = String.format("{\"round\":%d,\"number\":%d,\"hash\":\"%s\",\"ts\":%d,\"blind\":%s,\"server\":\"%s\"}", r, n, hash, ts, blindRun, server.replaceAll("[^a-z0-9.:-]", ""));
+            String body = String.format("{\"round\":%d,\"number\":%d,\"hash\":\"%s\",\"ts\":%d,\"blind\":%s,\"server\":\"%s\"%s}", r, n, hash, ts, blindRun, server.replaceAll("[^a-z0-9.:-]", ""),
+                loc == null || loc.isEmpty() ? "" : ",\"loc\":\"" + loc.replaceAll("[^A-Za-z0-9+/=]", "") + "\"");
             HttpRequest req = HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/hide"))
                 .timeout(Duration.ofSeconds(15))
                 .header("Content-Type", "application/json")
@@ -989,7 +1011,8 @@ public class QuillHider extends Module {
                 if (p.length < 5 || !p[4].trim().equals("0")) continue;
                 boolean bl = p.length > 5 && p[5].trim().equals("1");
                 String srv = p.length > 6 && !p[6].trim().isEmpty() ? p[6].trim() : serverName();
-                if (post(Integer.parseInt(p[0].trim()), Integer.parseInt(p[1].trim()), p[2].trim(), Long.parseLong(p[3].trim()), bl, srv)) { markSynced(p[2].trim()); sent++; }
+                String loc = p.length > 7 ? p[7].trim() : "";
+                if (post(Integer.parseInt(p[0].trim()), Integer.parseInt(p[1].trim()), p[2].trim(), Long.parseLong(p[3].trim()), bl, srv, loc)) { markSynced(p[2].trim()); sent++; }
             }
             if (sent > 0) say("Posted %d hash%s that were waiting.", sent, sent == 1 ? "" : "es");
         } catch (Exception ignored) { }
