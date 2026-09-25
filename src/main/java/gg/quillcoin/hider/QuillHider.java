@@ -137,7 +137,7 @@ public class QuillHider extends Module {
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
         .name("exit-tolerance").description("If you come out of the portal farther than this (overworld blocks) from the run's point, the run is void.").defaultValue(2500).min(200).sliderMax(20000).build());
     private final Setting<Integer> groundView = sgRun.add(new IntSetting.Builder()
-        .name("ground-view-distance").description("Render distance (chunks) while you are on the ground in the overworld part of a run: enough to fight and dig, not enough to recognise the area. Restored when the run ends.").defaultValue(2).min(2).sliderMax(8).build());
+        .name("ground-view-distance").description("Render distance (chunks) on the overworld ground phase. Blocks are not drawn anyway; this limits how far mobs, players, item frames and drops are drawn, since those can hint at a biome. Restored when the run ends.").defaultValue(2).min(2).sliderMax(8).build());
     private final Setting<Integer> returnDistance = sgRun.add(new IntSetting.Builder()
         .name("return-distance").description("After the stash the screen stays dark and locked until you are this far (blocks) from the chest, or in another dimension. Only then is the hash posted.").defaultValue(3000).min(200).sliderMax(50000).build());
     private final Setting<Integer> dungeonRadius = sgRun.add(new IntSetting.Builder()
