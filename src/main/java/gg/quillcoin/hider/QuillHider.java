@@ -6,6 +6,7 @@ import meteordevelopment.meteorclient.events.game.OpenScreenEvent;
 import meteordevelopment.meteorclient.events.meteor.KeyEvent;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.KeybindSetting;
@@ -203,6 +204,17 @@ public class QuillHider extends Module {
                 for (int i = 0; i < 9; i++) if (mc.player.getInventory().getStack(i).isOf(item)) { if (mc.player.getInventory().selectedSlot != i) mc.player.getInventory().selectedSlot = i; break; }
             }
         }
+    }
+
+    @EventHandler
+    private void onGameLeft(GameLeftEvent event) {
+        if (run == RunStage.RETURNING) { audit("logged out before leaving the chest - hash posts on next resync"); }
+        else if (run != RunStage.NONE) audit("logged out during a run (" + run.name().toLowerCase() + ") - run void");
+        run = RunStage.NONE; spawner = null; skipUntil = 0; takeoff = Takeoff.NONE;
+        broken.clear(); aimed.clear();
+        xray = Xray.OFF; xrayCenter = null; bubbleCenter = null;
+        savedView = -1;                                                              // options were restored by the game closing the world; don't double-restore
+        if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
     }
 
     @EventHandler
@@ -740,6 +752,12 @@ public class QuillHider extends Module {
             case ARRIVED -> setXray(Xray.BUBBLE, null);
             case OVERWORLD -> {
                 if (dim != World.OVERWORLD) { setXray(Xray.BUBBLE, null); return; }
+                if (Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0) > exitTolerance.get() + 2000) {
+                    run = RunStage.NONE; setXray(Xray.OFF, null);
+                    audit("far from the point in the overworld (respawned elsewhere?) - run void");
+                    warn("You're far from the run's point - the run is void.");
+                    return;
+                }
                 setXray(Xray.NOTHING, null);                                       // nothing but sky, fluids and mobs until a dungeon is in range
                 if (tick - lastScan < 20) return;
                 lastScan = tick;
@@ -755,6 +773,12 @@ public class QuillHider extends Module {
             }
             case DESIGNATED -> {
                 if (dim != World.OVERWORLD || spawner == null) { setXray(Xray.BUBBLE, null); return; }
+                if (Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0) > exitTolerance.get() + 2000) {
+                    run = RunStage.NONE; spawner = null; setXray(Xray.OFF, null);
+                    audit("far from the point in the overworld (respawned elsewhere?) - run void");
+                    warn("You're far from the run's point - the run is void.");
+                    return;
+                }
                 setXray(Xray.DUNGEON, spawner);
                 boolean inside = mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get());
                 if (inside && !revealed) { revealed = true; audit("in the dungeon"); say("You're in the dungeon. Open the chest and press %s.", stashKey.get()); }
