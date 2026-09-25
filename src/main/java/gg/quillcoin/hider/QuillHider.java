@@ -65,6 +65,7 @@ import org.lwjgl.glfw.GLFW;
 
 import java.io.File;
 import java.net.URI;
+import net.minecraft.client.network.ServerInfo;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -107,9 +108,9 @@ public class QuillHider extends Module {
     private final Setting<Integer> numbersPerRound = sgGeneral.add(new IntSetting.Builder()
         .name("numbers-per-round").description("Coin numbers are drawn at random from 1..this, so the number never reveals the hiding order.").defaultValue(1000).min(10).sliderMax(100000).build());
     private final Setting<String> siteUrl = sgGeneral.add(new StringSetting.Builder()
-        .name("site-url").description("Where hashes are posted (POST /api/hide). Empty = keep them in the local file only.").defaultValue("https://quillcoin.gg").build());
+        .name("site-url").description("Where hashes are posted (POST <url>/api/hide). https://quillcoin.gg resolves to the QuillCoin API. Empty = keep them in the local file only.").defaultValue("https://quillcoin.gg").build());
     private final Setting<String> apiKey = sgGeneral.add(new StringSetting.Builder()
-        .name("api-key").description("Bearer token for the site's hider endpoint. Stored in plain text in modules.nbt.").defaultValue("").build());
+        .name("api-key").description("Bearer token for the site's hider endpoint. Leave empty and put it in meteor-client/quillcoin-key.txt instead, so it never lands in modules.nbt.").defaultValue("").build());
     private final Setting<Keybind> stashKey = sgGeneral.add(new KeybindSetting.Builder()
         .name("stash-key").description("With a chest open: sign the book in your hotbar, hash it, put it in the chest.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_P)).build());
 
@@ -130,7 +131,7 @@ public class QuillHider extends Module {
     private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
         .name("test-distance").description("TESTING ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
     private final Setting<Keybind> devSkipKey = sgRun.add(new KeybindSetting.Builder()
-        .name("dev-skip-key").description("Singleplayer test worlds only: teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_END)).build());
+        .name("dev-skip-key").description("Singleplayer test worlds only: teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_J)).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
         .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
@@ -261,7 +262,9 @@ public class QuillHider extends Module {
     }
 
     private double stashX, stashZ;                                    // where the book went - lives here until you are far away, then gone
-    private int pendingRound, pendingNum; private String pendingHashForPost; private long pendingTs;
+    private int pendingRound, pendingNum; private String pendingHashForPost; private long pendingTs; private boolean pendingBlind; private String pendingServer;
+    /** Where https://quillcoin.gg (the default site-url) actually posts: the site itself is static. */
+    private static final String API_BASE = "https://ovjeipprgkeygnlkraiu.supabase.co/functions/v1";
     private boolean revealed;
 
     private RunStage run = RunStage.NONE;
@@ -394,7 +397,7 @@ public class QuillHider extends Module {
         int number = drawNumber();
         if (number == -1) { fail("Every number in this round is used - raise numbers-per-round."); return; }
         String code = makeCode();
-        String title = "R" + round.get() + " Coin " + number;
+        String title = "R" + effectiveRound() + " Coin " + number;
         List<String> pages = List.of(
             code,
             "This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins."
@@ -826,10 +829,10 @@ public class QuillHider extends Module {
         broken.clear();
         spawner = null;
         stashX = stashZ = 0;
-        final int r = pendingRound, n = pendingNum; final String hsh = pendingHashForPost; final long ts = pendingTs;
+        final int r = pendingRound, n = pendingNum; final String hsh = pendingHashForPost; final long ts = pendingTs; final boolean bl = pendingBlind; final String srv = pendingServer;
         pendingHashForPost = null;
         say("Away from the chest. Posting the hash now.");
-        if (hsh != null) new Thread(() -> { if (post(r, n, hsh, ts)) { markSynced(hsh); say("Hash posted - the coin is live on the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
+        if (hsh != null) new Thread(() -> { if (post(r, n, hsh, ts, bl, srv)) { markSynced(hsh); say("Hash posted - the coin is live on the site."); } else say("Site unreachable - the hash is saved locally and will be posted next time the module turns on."); }, "quillcoin-post").start();
     }
 
     /** A dungeon spawner: sits on cobblestone/mossy floor. Mineshaft and fortress spawners don't. */
@@ -896,7 +899,7 @@ public class QuillHider extends Module {
         try {
             if (hidesFile().exists()) for (String line : Files.readAllLines(hidesFile().toPath())) {
                 String[] p = line.split(",");
-                if (p.length >= 2 && Integer.parseInt(p[0].trim()) == round.get()) used.add(Integer.parseInt(p[1].trim()));
+                if (p.length >= 2 && Integer.parseInt(p[0].trim()) == effectiveRound()) used.add(Integer.parseInt(p[1].trim()));
             }
         } catch (Exception ignored) { }
         return used;
@@ -912,12 +915,12 @@ public class QuillHider extends Module {
         return -1;
     }
 
-    /** round,number,hash,unix-seconds,synced - and nothing else, ever. */
+    /** round,number,hash,unix-seconds,synced,blind,server - and nothing else, ever. */
     private void record() {
         long now = System.currentTimeMillis() / 1000;
         boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
         audit("stashed " + pendingTitle + (blindRun ? " at the end of a blind run" : " WITHOUT a blind run"));
-        String line = round.get() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0);
+        String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName();
         stashX = mc.player.getX(); stashZ = mc.player.getZ();
         spawner = null;
         revealed = false;
@@ -926,19 +929,39 @@ public class QuillHider extends Module {
             Files.writeString(hidesFile().toPath(), line + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception e) { fail("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
         say("%s hidden%s. Now pearl or tp away - the screen stays dark and the hash posts once you're %d blocks from here.", pendingTitle, blindRun ? " at the end of a blind run" : "", returnDistance.get());
-        pendingRound = round.get(); pendingNum = pendingNumber; pendingHashForPost = pendingHash; pendingTs = now;
+        pendingRound = effectiveRound(); pendingNum = pendingNumber; pendingHashForPost = pendingHash; pendingTs = now; pendingBlind = blindRun; pendingServer = serverName();
         pendingHash = null;
     }
 
-    private boolean post(int r, int n, String hash, long ts) {
-        String url = siteUrl.get().trim();
-        if (url.isEmpty() || apiKey.get().isEmpty()) return false;
+    /** Singleplayer hides are always round 0 (the test round), whatever the setting says: only a 2b2t hide can carry a real round number. */
+    private int effectiveRound() { return mc.isInSingleplayer() ? 0 : round.get(); }
+
+    private String serverName() {
+        if (mc.isInSingleplayer()) return "singleplayer";
+        ServerInfo si = mc.getCurrentServerEntry();
+        return si == null || si.address == null ? "unknown" : si.address.trim().toLowerCase();
+    }
+
+    /** The api-key setting, or meteor-client/quillcoin-key.txt when the setting is empty. */
+    private String hiderKey() {
+        String k = apiKey.get().trim();
+        if (!k.isEmpty()) return k;
         try {
-            String body = String.format("{\"round\":%d,\"number\":%d,\"hash\":\"%s\",\"ts\":%d}", r, n, hash, ts);   // blind flag rides in the file; the site learns it on sync v2
+            File f = new File(MeteorClient.FOLDER, "quillcoin-key.txt");
+            return f.exists() ? Files.readString(f.toPath(), StandardCharsets.UTF_8).trim() : "";
+        } catch (Exception e) { return ""; }
+    }
+
+    private boolean post(int r, int n, String hash, long ts, boolean blindRun, String server) {
+        String url = siteUrl.get().trim(), key = hiderKey();
+        if (url.isEmpty() || key.isEmpty()) return false;
+        if (url.replaceAll("/+$", "").endsWith("quillcoin.gg")) url = API_BASE;
+        try {
+            String body = String.format("{\"round\":%d,\"number\":%d,\"hash\":\"%s\",\"ts\":%d,\"blind\":%s,\"server\":\"%s\"}", r, n, hash, ts, blindRun, server.replaceAll("[^a-z0-9.:-]", ""));
             HttpRequest req = HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/hide"))
                 .timeout(Duration.ofSeconds(15))
                 .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer " + apiKey.get())
+                .header("Authorization", "Bearer " + key)
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build();
             HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
             return resp.statusCode() / 100 == 2;
@@ -959,12 +982,14 @@ public class QuillHider extends Module {
 
     private void resync() {
         try {
-            if (!hidesFile().exists() || apiKey.get().isEmpty()) return;
+            if (!hidesFile().exists() || hiderKey().isEmpty()) return;
             int sent = 0;
             for (String line : Files.readAllLines(hidesFile().toPath())) {
                 String[] p = line.split(",");
                 if (p.length < 5 || !p[4].trim().equals("0")) continue;
-                if (post(Integer.parseInt(p[0].trim()), Integer.parseInt(p[1].trim()), p[2].trim(), Long.parseLong(p[3].trim()))) { markSynced(p[2].trim()); sent++; }
+                boolean bl = p.length > 5 && p[5].trim().equals("1");
+                String srv = p.length > 6 && !p[6].trim().isEmpty() ? p[6].trim() : serverName();
+                if (post(Integer.parseInt(p[0].trim()), Integer.parseInt(p[1].trim()), p[2].trim(), Long.parseLong(p[3].trim()), bl, srv)) { markSynced(p[2].trim()); sent++; }
             }
             if (sent > 0) say("Posted %d hash%s that were waiting.", sent, sent == 1 ? "" : "es");
         } catch (Exception ignored) { }

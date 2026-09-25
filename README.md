@@ -9,7 +9,7 @@ With a dungeon chest open and a book-and-quill in your hotbar, press the stash k
 2. It is written into the book and the book is signed. The **server** stamps the author, so a coin book can only be created by the account that is logged in as `QuillCoin`.
 3. The code is hashed (SHA-256) and the code is discarded.
 4. The signed book is shift-clicked into the chest and the chest is closed.
-5. `round,number,hash,unix-time,synced,blind` is appended to `meteor-client/quillcoin-hides.txt` and posted to `POST /api/hide` on the site.
+5. `round,number,hash,unix-time,synced,blind,server` is appended to `meteor-client/quillcoin-hides.txt` and posted to `POST /api/hide` (the default site-url `https://quillcoin.gg` resolves to the QuillCoin API). Hides made in singleplayer are always round 0, the test round; the API refuses a real round number from anywhere but 2b2t.org, and refuses everything once a round is open. The hider key lives in `meteor-client/quillcoin-key.txt`, never in modules.nbt.
 
 ## What the hider never sees
 - The code: it lives in memory between signing and hashing and is never printed, logged or rendered.
