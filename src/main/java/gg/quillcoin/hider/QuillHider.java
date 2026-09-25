@@ -385,8 +385,12 @@ public class QuillHider extends Module {
             for (int i = 0; i < 36; i++) { ItemStack s = mc.player.getInventory().getStack(i); if (s.isOf(Items.FIREWORK_ROCKET)) rockets += s.getCount(); }
             int cx = sw / 2, cy = sh / 2;
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 4, 0xFFAAAAAA);
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 16, 0xFF666666);
+            double left = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
+            double spd = Math.hypot(mc.player.getVelocity().x, mc.player.getVelocity().z) * 20;
+            String eta = spd > 5 ? "  ~" + (int) Math.ceil(left / spd / 60) + " min" : "";
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, (int) left + " m left" + eta, cx, cy + 4, 0xFFFFFFFF);
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth() + "   " + (int) spd + " b/s", cx, cy + 16, 0xFFAAAAAA);
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 28, 0xFF666666);
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: take off (" + runKey.get() + " to resume)"
