@@ -405,12 +405,13 @@ public class QuillHider extends Module {
             if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
         if (feed.get()) {
-            int y = sh - 78 - feedLines.size() * 10;                                   // clear of the hotbar and the bars above it
+            int y = 6;                                                                 // top right: the HUD is off during runs, so the corner is free
             String head = "quill " + run.name().toLowerCase() + " / " + stage.name().toLowerCase();
-            event.drawContext.drawTextWithShadow(mc.textRenderer, head, sw - 6 - mc.textRenderer.getWidth(head), y - 12, 0xFFE6C85A);
+            event.drawContext.drawTextWithShadow(mc.textRenderer, head, sw - 6 - mc.textRenderer.getWidth(head), y, 0xFFE6C85A);
+            y += 12;
             for (String l : feedLines) {
-                String t = l.length() > 60 ? l.substring(0, 59) + "…" : l;
-                event.drawContext.drawTextWithShadow(mc.textRenderer, t, sw - 6 - mc.textRenderer.getWidth(t), y, 0xFFCCCCCC);
+                String t = l.length() > 42 ? l.substring(0, 41) + "…" : l;
+                event.drawContext.drawTextWithShadow(mc.textRenderer, t, sw - 6 - mc.textRenderer.getWidth(t), y, 0xFFBBBBBB);
                 y += 10;
             }
         }
@@ -426,7 +427,8 @@ public class QuillHider extends Module {
         try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { fail("Baritone isn't installed."); return; }
         if (run == RunStage.FLYING) {
             fly();
-            say("Resuming the run. Take off.");
+            info("Resuming the run. Take off.");
+            feed("resuming");
             return;
         }
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
@@ -441,7 +443,8 @@ public class QuillHider extends Module {
         run = RunStage.FLYING;
         audit("run started");
         fly();
-        say("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
+        info("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
+        feed("blind run started");
     }
 
     private Boolean savedAutoJump;
@@ -473,7 +476,8 @@ public class QuillHider extends Module {
                     audit("arrived at the point after " + peeks + " peek(s)");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
                 } else if (!elytraActive() && !mc.player.isGliding() && tick % 600 == 0) {
-                    say("Baritone isn't flying. Press %s to resume the run.", runKey.get());
+                    info("Baritone isn't flying. Press %s to resume the run.", runKey.get());
+                    feed("baritone idle - press " + runKey.get());
                 }
             }
             case OVERWORLD -> {
