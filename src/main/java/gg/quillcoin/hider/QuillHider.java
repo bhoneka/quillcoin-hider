@@ -116,6 +116,8 @@ public class QuillHider extends Module {
         .name("max-ow-radius").description("Farthest the random point may be from 0,0 - in OVERWORLD blocks (nether flight is an eighth of it).").defaultValue(100000).min(1000).sliderMax(5000000).build());
     private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
         .name("test-distance").description("TESTING ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
+    private final Setting<Keybind> devSkipKey = sgRun.add(new KeybindSetting.Builder()
+        .name("dev-skip-key").description("TESTING ONLY (needs test-distance > 0 and cheats): teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_K)).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
         .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
@@ -244,6 +246,7 @@ public class QuillHider extends Module {
         if (event.key == GLFW.GLFW_KEY_F3 && run != RunStage.NONE) { event.cancel(); return; }   // F3 is dead during a run, no flicker
         if (event.action != KeyAction.Press) return;
         if (runKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); startOrResumeRun(); return; }
+        if (devSkipKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); devSkip(); return; }
         if (!stashKey.get().matches(true, event.key, event.modifiers)) return;
         event.cancel();
         if (stage == Stage.RETRY) { retryStash(); return; }
@@ -333,6 +336,7 @@ public class QuillHider extends Module {
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
         else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
+        if (feedbackRestoreTick != 0 && tick >= feedbackRestoreTick) { feedbackRestoreTick = 0; mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback true"); }
         runTick();
 
         switch (stage) {
@@ -576,6 +580,22 @@ public class QuillHider extends Module {
             }
             default -> {}
         }
+    }
+
+    private long feedbackRestoreTick;
+
+    /** Test worlds only: jump to the point without the flight. Feedback is muted so the tp message can't print the coordinates. */
+    private void devSkip() {
+        if (run != RunStage.FLYING) { fail("Dev skip only works during the flight leg of a run."); return; }
+        if (testRadius.get() <= 0) { fail("Dev skip is only allowed in test mode (test-distance > 0)."); return; }
+        mc.options.jumpKey.setPressed(false);
+        takeoff = Takeoff.NONE;
+        try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
+        mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback false");
+        mc.getNetworkHandler().sendChatCommand("tp @s " + targetNX + " ~ " + targetNZ);
+        feedbackRestoreTick = tick + 40;
+        audit("DEV SKIP used - teleported to the point (test run)");
+        feed("dev skip");
     }
 
     private boolean elytraActive() {
