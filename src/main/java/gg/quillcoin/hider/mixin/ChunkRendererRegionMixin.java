@@ -11,14 +11,15 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * The ground half of a blind run: the chunk builder asks this region for every block it meshes. Hidden positions answer
- * "air", so no renderer - vanilla or Fabric's Indigo - ever draws them. The run's dungeon still answers truthfully, and
- * because its neighbours read as air, its whole shell is drawn. Fluids and entities are untouched: lava stays visible.
+ * The chunk builder asks this region for every block it meshes. Hidden positions answer "air", so no renderer - vanilla
+ * or Fabric's Indigo - ever draws them. What stays visible depends on the run: a 7x7x7 bubble around the hider in the
+ * nether, only the run's dungeon in the overworld, nothing at all after the stash. Beds, portals, obsidian and torches
+ * are always drawn so the portal-and-bed routine works. Fluids and entities are untouched: lava stays visible.
  */
 @Mixin(ChunkRendererRegion.class)
 public class ChunkRendererRegionMixin {
-    @Inject(method = "getBlockState", at = @At("HEAD"), cancellable = true)
+    @Inject(method = "getBlockState", at = @At("RETURN"), cancellable = true)
     private void quillcoin$hideBlocks(BlockPos pos, CallbackInfoReturnable<BlockState> cir) {
-        if (QuillHider.hideBlock(pos)) cir.setReturnValue(Blocks.AIR.getDefaultState());
+        if (QuillHider.hideBlock(pos, cir.getReturnValue())) cir.setReturnValue(Blocks.AIR.getDefaultState());
     }
 }

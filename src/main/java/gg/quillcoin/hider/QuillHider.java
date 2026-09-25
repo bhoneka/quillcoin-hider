@@ -16,8 +16,6 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
-import meteordevelopment.meteorclient.mixin.ChatHudAccessor;
-import net.minecraft.client.gui.hud.ChatHudLine;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
@@ -26,6 +24,16 @@ import baritone.api.BaritoneAPI;
 import baritone.api.pathing.goals.GoalXZ;
 import meteordevelopment.meteorclient.events.render.TooltipDataEvent;
 import meteordevelopment.meteorclient.events.render.RenderBlockEntityEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.utils.render.RenderUtils;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.BlockState;
+import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
+import com.mojang.blaze3d.systems.RenderSystem;
+import java.util.LinkedHashMap;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
@@ -134,22 +142,80 @@ public class QuillHider extends Module {
     /** NONE -> FLYING (nether, Baritone) -> ARRIVED (build a portal) -> OVERWORLD (fly, find a spawner) -> DESIGNATED (stash allowed here) */
     private enum RunStage { NONE, FLYING, ARRIVED, OVERWORLD, DESIGNATED, RETURNING }
     private static QuillHider INSTANCE;
-    private static volatile boolean xrayOn;
-    private static volatile BlockPos xrayCenter;                       // the run's dungeon, or null = draw nothing at all
-    private static final int XRAY_XZ = 6, XRAY_DOWN = 2, XRAY_UP = 5;
+    /** OFF = draw the world; NOTHING = only whitelisted blocks; DUNGEON = the run's dungeon box; BUBBLE = 7x7x7 around the hider */
+    private enum Xray { OFF, NOTHING, DUNGEON, BUBBLE }
+    private static volatile Xray xray = Xray.OFF;
+    private static volatile BlockPos xrayCenter, bubbleCenter;
+    private static final int XRAY_XZ = 6, XRAY_DOWN = 2, XRAY_UP = 5, BUBBLE = 3;
 
-    /** Called for every block the chunk builder wants to draw. True = leave it out. */
-    public static boolean hideBlock(BlockPos pos) {
-        if (!xrayOn) return false;
+    /** Called for every block the chunk builder meshes. True = leave it out. Beds, portals, obsidian and torches always draw. */
+    public static boolean hideBlock(BlockPos pos, BlockState state) {
+        Xray m = xray;
+        if (m == Xray.OFF) return false;
+        if (state != null) {
+            if (state.getBlock() instanceof BedBlock || state.isOf(Blocks.NETHER_PORTAL) || state.isOf(Blocks.OBSIDIAN) || state.isOf(Blocks.CRYING_OBSIDIAN)
+                || state.isOf(Blocks.TORCH) || state.isOf(Blocks.WALL_TORCH) || state.isOf(Blocks.SOUL_TORCH) || state.isOf(Blocks.SOUL_WALL_TORCH)) return false;
+        }
+        if (m == Xray.NOTHING) return true;
+        if (m == Xray.BUBBLE) {
+            BlockPos b = bubbleCenter;
+            return b == null || Math.abs(pos.getX() - b.getX()) > BUBBLE || Math.abs(pos.getY() - b.getY()) > BUBBLE || Math.abs(pos.getZ() - b.getZ()) > BUBBLE;
+        }
         BlockPos c = xrayCenter;
         if (c == null) return true;
         return Math.abs(pos.getX() - c.getX()) > XRAY_XZ || Math.abs(pos.getZ() - c.getZ()) > XRAY_XZ || pos.getY() < c.getY() - XRAY_DOWN || pos.getY() > c.getY() + XRAY_UP;
     }
 
-    private void setXray(boolean on, BlockPos center) {
-        boolean changed = on != xrayOn || (center == null ? xrayCenter != null : !center.equals(xrayCenter));
-        xrayOn = on; xrayCenter = center;
+    private void setXray(Xray m, BlockPos center) {
+        boolean changed = m != xray || (center == null ? xrayCenter != null : !center.equals(xrayCenter));
+        xray = m; xrayCenter = center;
         if (changed && mc.worldRenderer != null) mc.worldRenderer.reload();
+    }
+
+    /** The bubble follows the hider: re-mesh the sections around the old and new spot when they move a block. */
+    private void bubbleTick() {
+        if (xray != Xray.BUBBLE || mc.player == null) return;
+        BlockPos p = mc.player.getBlockPos();
+        if (p.equals(bubbleCenter)) return;
+        BlockPos old = bubbleCenter;
+        bubbleCenter = p;
+        int r = BUBBLE + 1;
+        mc.worldRenderer.scheduleBlockRenders(p.getX() - r, p.getY() - r, p.getZ() - r, p.getX() + r, p.getY() + r, p.getZ() + r);
+        if (old != null) mc.worldRenderer.scheduleBlockRenders(old.getX() - r, old.getY() - r, old.getZ() - r, old.getX() + r, old.getY() + r, old.getZ() + r);
+    }
+
+    // ---------- every block broken during a run gets a ghost outline until the same block is back (memory only, never written)
+    private final LinkedHashMap<BlockPos, BlockState> broken = new LinkedHashMap<>();
+
+    @EventHandler
+    private void onPacketSend(PacketEvent.Send event) {
+        if (run == RunStage.NONE || mc.world == null) return;
+        if (event.packet instanceof PlayerActionC2SPacket p && p.getAction() == PlayerActionC2SPacket.Action.START_DESTROY_BLOCK) {
+            BlockState st = mc.world.getBlockState(p.getPos());
+            if (!st.isAir() && !broken.containsKey(p.getPos())) broken.put(p.getPos().toImmutable(), st);
+        }
+    }
+
+    private int missingBlocks() {
+        int n = 0;
+        for (Map.Entry<BlockPos, BlockState> e : broken.entrySet()) if (!mc.world.getBlockState(e.getKey()).isOf(e.getValue().getBlock())) n++;
+        return n;
+    }
+
+    private static final SettingColor DUNGEON_COLOR = new SettingColor(230, 200, 90, 230), GHOST_COLOR = new SettingColor(90, 200, 255, 200);
+
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (mc.player == null || run == RunStage.NONE) return;
+        if (run == RunStage.DESIGNATED && spawner != null && mc.world.getRegistryKey() == World.OVERWORLD) {
+            event.renderer.line(RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z, spawner.getX() + 0.5, spawner.getY() + 0.5, spawner.getZ() + 0.5, DUNGEON_COLOR);
+            event.renderer.box(spawner.getX() - 3, spawner.getY() - 1, spawner.getZ() - 3, spawner.getX() + 4, spawner.getY() + 4, spawner.getZ() + 4, DUNGEON_COLOR, DUNGEON_COLOR, ShapeMode.Lines, 0);
+        }
+        for (Map.Entry<BlockPos, BlockState> e : broken.entrySet()) {
+            BlockPos b = e.getKey();
+            if (mc.world.getBlockState(b).isOf(e.getValue().getBlock())) continue;                      // put back
+            event.renderer.box(b.getX(), b.getY(), b.getZ(), b.getX() + 1, b.getY() + 1, b.getZ() + 1, GHOST_COLOR, GHOST_COLOR, ShapeMode.Lines, 0);
+        }
     }
 
     private double stashX, stashZ;                                    // where the book went - lives here until you are far away, then gone
@@ -188,7 +254,8 @@ public class QuillHider extends Module {
     public void onDeactivate() {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
         if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; }
-        setXray(false, null);
+        setXray(Xray.OFF, null);
+        broken.clear();
         if (run == RunStage.RETURNING) audit("module switched off before leaving the chest - hash posts on next resync");
         restoreView();
         restoreAutoJump();
@@ -340,6 +407,7 @@ public class QuillHider extends Module {
         else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
         if (feedbackRestoreTick != 0 && tick >= feedbackRestoreTick) { feedbackRestoreTick = 0; mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback true"); }
         runTick();
+        bubbleTick();
 
         switch (stage) {
             case SIGNING -> {
@@ -385,7 +453,7 @@ public class QuillHider extends Module {
 
     @EventHandler
     private void onRenderBlockEntity(RenderBlockEntityEvent event) {
-        if (xrayOn && hideBlock(event.blockEntity.getPos())) event.cancel();
+        if (xray != Xray.OFF && hideBlock(event.blockEntity.getPos(), null)) event.cancel();
     }
 
     @EventHandler(priority = EventPriority.LOWEST - 1000)
@@ -430,13 +498,14 @@ public class QuillHider extends Module {
         float sx = fw / (float) sw, sy = fh / (float) sh;
         boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding();
         if (covered) {
-            event.drawContext.getMatrices().push();
-            event.drawContext.getMatrices().translate(0, 0, 1000);                    // above the chat (z 50) and anything else already drawn
+            event.drawContext.draw();                                              // everything drawn so far goes to the screen first
+            RenderSystem.disableDepthTest();                                       // then the cover, ignoring whatever depth the HUD left behind
             event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);
-            event.drawContext.getMatrices().pop();
+            event.drawContext.draw();
+            RenderSystem.enableDepthTest();
         }
         event.drawContext.getMatrices().push();
-        event.drawContext.getMatrices().translate(0, 0, 1001);
+        event.drawContext.getMatrices().translate(0, 0, 400);
         event.drawContext.getMatrices().scale(sx, sy, 1f);
         if (covered) {
             int rockets = 0;
@@ -455,26 +524,16 @@ public class QuillHider extends Module {
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, sub, cx, cy + 4, 0xFFFFFFFF);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 16, 0xFFAAAAAA);
             if (run == RunStage.FLYING) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop voids the run and gives you your eyes back", cx, cy + 28, 0xFF666666);
-            if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ChatScreen)) {   // chat open = vanilla draws it on top anyway
-                try {
-                    java.util.List<ChatHudLine.Visible> lines = ((ChatHudAccessor) mc.inGameHud.getChatHud()).getVisibleMessages();
-                    float cs = mc.options.getChatScale().getValue().floatValue();
-                    int n = Math.min(8, lines.size());
-                    event.drawContext.getMatrices().push();
-                    event.drawContext.getMatrices().translate(2, sh - 40, 0);
-                    event.drawContext.getMatrices().scale(cs, cs, 1f);
-                    int y = -9;
-                    for (int i = 0; i < n; i++) { event.drawContext.drawTextWithShadow(mc.textRenderer, lines.get(i).content(), 2, y, 0xFFFFFFFF); y -= 9; }
-                    event.drawContext.getMatrices().pop();
-                } catch (Throwable ignored) { }
-            }
+
 
         } else {
-            String top = run == RunStage.DESIGNATED ? arrow()
+            int miss = missingBlocks();
+            String fix = miss > 0 ? "   |   " + miss + " block" + (miss > 1 ? "s" : "") + " to put back" : "";
+            String top = run == RunStage.DESIGNATED ? arrow() + fix
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: taking off"
                 : run == RunStage.ARRIVED ? "blind run: build a portal here and go through"
                 : run == RunStage.OVERWORLD ? "blind run: walk until a dungeon appears"
-                : run == RunStage.RETURNING ? "stashed - pearl or tp away; the hash posts when you're " + returnDistance.get() + " blocks from here" : "";
+                : run == RunStage.RETURNING ? "stashed - put your blocks back, then pearl or tp away; the hash posts when you're " + returnDistance.get() + " blocks from here" + fix : "";
             if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
         if (feed.get()) {
@@ -614,7 +673,7 @@ public class QuillHider extends Module {
         takeoff = Takeoff.NONE;
         try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
         elytraWasActive = false;                                                 // the flight is over by teleport, not by stopping
-        skipUntil = tick + 100;
+        skipUntil = 1;
         mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback false");
         mc.getNetworkHandler().sendChatCommand("tp @s " + targetNX + " ~ " + targetNZ);
         feedbackRestoreTick = tick + 40;
@@ -633,6 +692,7 @@ public class QuillHider extends Module {
         switch (run) {
             case FLYING -> {
                 if (dim != World.NETHER) return;
+                setXray(Xray.BUBBLE, null);                                        // on the ground you see a 7x7x7 bubble; in the air the cover is black anyway
                 double d = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
                 boolean active = elytraActive();
                 if (d <= arriveRadius.get() && !mc.player.isGliding()) {
@@ -641,8 +701,8 @@ public class QuillHider extends Module {
                     elytraWasActive = false;
                     audit("arrived at the point");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
-                } else if (skipUntil != 0 && tick < skipUntil) {
-                    return;                                                          // dev skip in flight: wait for the teleport to land us at the point
+                } else if (skipUntil != 0) {
+                    return;                                                          // dev skip: wait for the teleport and the touchdown, nothing else
                 } else if (elytraWasActive && !active) {
                     // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point - void now, see now, land yourself
                     run = RunStage.NONE;
@@ -654,9 +714,10 @@ public class QuillHider extends Module {
                 }
                 if (active && mc.player.isGliding()) { elytraWasActive = true; if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; } }
             }
+            case ARRIVED -> setXray(Xray.BUBBLE, null);
             case OVERWORLD -> {
-                if (dim != World.OVERWORLD) { setXray(false, null); return; }
-                setXray(true, null);                                               // nothing but sky, fluids and mobs until a dungeon is in range
+                if (dim != World.OVERWORLD) { setXray(Xray.BUBBLE, null); return; }
+                setXray(Xray.NOTHING, null);                                       // nothing but sky, fluids and mobs until a dungeon is in range
                 if (tick - lastScan < 20) return;
                 lastScan = tick;
                 BlockPos found = nearestDungeonSpawner();
@@ -664,23 +725,23 @@ public class QuillHider extends Module {
                     spawner = found;
                     revealed = false;
                     run = RunStage.DESIGNATED;
-                    setXray(true, spawner);
+                    setXray(Xray.DUNGEON, spawner);
                     audit("dungeon designated");
                     say("Dungeon found - it's the only thing drawn. Walk there, dig down, put your blocks back, stash.");
                 } else if (tick % 200 == 0) feed("no dungeon in range - keep walking");
             }
             case DESIGNATED -> {
-                if (dim != World.OVERWORLD || spawner == null) { setXray(false, null); return; }
-                setXray(true, spawner);
+                if (dim != World.OVERWORLD || spawner == null) { setXray(Xray.BUBBLE, null); return; }
+                setXray(Xray.DUNGEON, spawner);
                 boolean inside = mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get());
                 if (inside && !revealed) { revealed = true; audit("in the dungeon"); say("You're in the dungeon. Open the chest and press %s.", stashKey.get()); }
             }
             case RETURNING -> {
-                setXray(dim == World.OVERWORLD, null);                              // the world stays hidden until you're gone (a dimension change ends it anyway)
+                setXray(dim == World.OVERWORLD ? Xray.NOTHING : Xray.BUBBLE, null); // the world stays hidden until you're gone
                 double d = Math.hypot(mc.player.getX() - stashX, mc.player.getZ() - stashZ);
                 if (d > returnDistance.get()) finishReturn("far from the chest");
             }
-            default -> { if (xrayOn) setXray(false, null); }
+            default -> { if (xray != Xray.OFF) setXray(Xray.OFF, null); }
         }
     }
 
@@ -714,7 +775,8 @@ public class QuillHider extends Module {
     private void finishReturn(String how) {
         audit("away from the stash (" + how + ") - posting the hash");
         run = RunStage.NONE;
-        setXray(false, null);
+        setXray(Xray.OFF, null);
+        broken.clear();
         spawner = null;
         stashX = stashZ = 0;
         final int r = pendingRound, n = pendingNum; final String hsh = pendingHashForPost; final long ts = pendingTs;
