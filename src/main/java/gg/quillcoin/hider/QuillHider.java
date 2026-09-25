@@ -116,6 +116,8 @@ public class QuillHider extends Module {
         .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
         .name("exit-tolerance").description("If you come out of the portal farther than this (overworld blocks) from the run's point, the run is void.").defaultValue(2500).min(200).sliderMax(20000).build());
+    private final Setting<Integer> groundView = sgRun.add(new IntSetting.Builder()
+        .name("ground-view-distance").description("Render distance (chunks) while you are on the ground in the overworld part of a run: enough to fight and dig, not enough to recognise the area. Restored when the run ends.").defaultValue(2).min(2).sliderMax(8).build());
     private final Setting<Integer> dungeonRadius = sgRun.add(new IntSetting.Builder()
         .name("dungeon-radius").description("You must be within this many blocks of the run's spawner to stash.").defaultValue(10).min(4).sliderMax(24).build());
 
@@ -140,6 +142,7 @@ public class QuillHider extends Module {
     private int pendingSlot = -1, pendingNumber;
     private String pendingHash, pendingTitle;
     private boolean warnedMaps, peeking, hudWasActive = true, hudSuppressed;
+    private int savedView = -1;
     private int peeks;
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private static final SecureRandom RNG = new SecureRandom();
@@ -152,6 +155,7 @@ public class QuillHider extends Module {
     @Override
     public void onDeactivate() {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
+        restoreView();
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE;
         spawner = null;
@@ -168,6 +172,20 @@ public class QuillHider extends Module {
         warnedMaps = false;
         lastHealth = mc.player == null ? 20 : mc.player.getHealth();
         new Thread(this::resync, "quillcoin-resync").start();
+    }
+
+    private void shrinkView() {
+        if (savedView != -1) return;
+        savedView = mc.options.getViewDistance().getValue();
+        mc.options.getViewDistance().setValue(groundView.get());
+        feed("view pulled in to " + groundView.get() + " chunks");
+    }
+
+    private void restoreView() {
+        if (savedView == -1) return;
+        mc.options.getViewDistance().setValue(savedView);
+        savedView = -1;
+        feed("view distance restored");
     }
 
     private static File hidesFile() { return new File(MeteorClient.FOLDER, "quillcoin-hides.txt"); }
@@ -270,6 +288,9 @@ public class QuillHider extends Module {
         if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
         // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
         // while a run is live or the screen is covered, the HUD is simply off. It comes back when the run ends.
+        boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED;
+        if (onGroundPhase && savedView == -1) shrinkView();
+        else if (!onGroundPhase && savedView != -1) restoreView();
         boolean wantHudOff = run != RunStage.NONE || (blind.get() && mc.player.isGliding());
         Hud hud = Hud.get();
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }

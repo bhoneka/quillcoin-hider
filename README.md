@@ -23,7 +23,8 @@ With `require-blind-run` on (the default), the stash key only works at a dungeon
 2. Within `arrive-radius` of the point you land; the mod says to build a portal and go through.
 3. Coming out in the overworld, the mod checks you are within `exit-tolerance` of the point; farther, and the run is void.
 4. You fly around; the first dungeon spawner the mod sees (a spawner standing on cobblestone) becomes the run's dungeon. A HUD line gives relative guidance only - "dungeon ahead-left, 140m, 38 down" - never a coordinate.
-5. Within `dungeon-radius` of that spawner, with its chest open, the stash key works. The hides file records `blind=1`.
+5. On the ground in the overworld the render distance is pulled in to `ground-view-distance` (2 chunks): enough to fight and dig, not enough to recognise the area. It is restored when the run ends.
+6. Within `dungeon-radius` of that spawner, with its chest open, the stash key works. The hides file records `blind=1`.
 
 The point, the spawner's position and your position never leave memory. Any dimension change other than the expected nether-to-overworld voids the run.
 
