@@ -16,8 +16,6 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
-import meteordevelopment.meteorclient.mixin.ChatHudAccessor;
-import net.minecraft.client.gui.hud.ChatHudLine;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
@@ -449,12 +447,7 @@ public class QuillHider extends Module {
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, sub, cx, cy + 4, 0xFFFFFFFF);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 16, 0xFFAAAAAA);
             if (run == RunStage.FLYING) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop voids the run and gives you your eyes back", cx, cy + 28, 0xFF666666);
-            try {                                                                  // the last few chat lines, redrawn over the black so nothing under it shows
-                java.util.List<ChatHudLine.Visible> lines = ((ChatHudAccessor) mc.inGameHud.getChatHud()).getVisibleMessages();
-                int n = Math.min(8, lines.size());
-                int y = sh - 40 - 9;
-                for (int i = 0; i < n; i++) { event.drawContext.drawTextWithShadow(mc.textRenderer, lines.get(i).content(), 4, y, 0xFFDDDDDD); y -= 9; }
-            } catch (Throwable ignored) { }
+
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: taking off"
@@ -590,7 +583,7 @@ public class QuillHider extends Module {
         }
     }
 
-    private long feedbackRestoreTick;
+    private long feedbackRestoreTick, skipUntil;
 
     /** Test worlds only: jump to the point without the flight. Feedback is muted so the tp message can't print the coordinates. */
     private void devSkip() {
@@ -599,6 +592,8 @@ public class QuillHider extends Module {
         mc.options.jumpKey.setPressed(false);
         takeoff = Takeoff.NONE;
         try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
+        elytraWasActive = false;                                                 // the flight is over by teleport, not by stopping
+        skipUntil = tick + 100;
         mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback false");
         mc.getNetworkHandler().sendChatCommand("tp @s " + targetNX + " ~ " + targetNZ);
         feedbackRestoreTick = tick + 40;
@@ -620,10 +615,13 @@ public class QuillHider extends Module {
                 double d = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
                 boolean active = elytraActive();
                 if (d <= arriveRadius.get() && !mc.player.isGliding()) {
+                    skipUntil = 0;
                     run = RunStage.ARRIVED;
                     elytraWasActive = false;
                     audit("arrived at the point");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
+                } else if (skipUntil != 0 && tick < skipUntil) {
+                    return;                                                          // dev skip in flight: wait for the teleport to land us at the point
                 } else if (elytraWasActive && !active) {
                     // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point - void now, see now, land yourself
                     run = RunStage.NONE;
