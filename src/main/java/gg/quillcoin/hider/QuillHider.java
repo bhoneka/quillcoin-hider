@@ -31,6 +31,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.util.Hand;
+import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 import net.minecraft.world.chunk.WorldChunk;
 import java.util.Map;
 import net.minecraft.client.gui.screen.ingame.BookScreen;
@@ -489,23 +490,32 @@ public class QuillHider extends Module {
         switch (takeoff) {
             case JUMPING -> {
                 if (tick - takeoffSince > 200) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; return; }   // try again
-                if (mc.player.isGliding()) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.BOOST; boostFired = false; secondRocket = false; return; }
+                if (mc.player.isGliding()) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.BOOST; boostFired = false; secondRocket = false; audit("takeoff: gliding"); return; }
+                if (mc.player.getAbilities().flying) {                                   // creative hover: drop out of it, then it's an ordinary fall
+                    mc.player.getAbilities().flying = false;
+                    mc.player.sendAbilitiesUpdate();
+                    mc.options.jumpKey.setPressed(false);
+                    wasAirborne = true;
+                    return;
+                }
                 if (mc.player.isOnGround()) {
                     if (wasAirborne) { jumpTapped = false; wasAirborne = false; }
-                    if (!jumpTapped) { mc.options.jumpKey.setPressed(true); jumpTapped = true; }
+                    if (!jumpTapped) { mc.options.jumpKey.setPressed(true); jumpTapped = true; audit("takeoff: hop"); }
                     else mc.options.jumpKey.setPressed(false);
                 } else {
                     wasAirborne = true;
-                    mc.options.jumpKey.setPressed(mc.player.getVelocity().y <= 0.08);   // rising: released; apex/fall: fresh press = deploy
+                    mc.options.jumpKey.setPressed(false);                                 // never hold jump in the air (creative: that's "ascend")
+                    if (mc.player.getVelocity().y < 0 && tick % 2 == 0)                   // falling: ask the server to deploy, the way a jump press would
+                        mc.getNetworkHandler().sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
                 }
             }
             case BOOST -> {
                 if (!mc.player.isGliding()) { if (mc.player.isOnGround()) takeoff = Takeoff.NONE; return; }
-                if (!boostFired) { mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND); mc.player.swingHand(Hand.MAIN_HAND); boostFired = true; boostTick = tick; return; }
+                if (!boostFired) { mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND); mc.player.swingHand(Hand.MAIN_HAND); boostFired = true; boostTick = tick; audit("takeoff: rocket"); return; }
                 if (!secondRocket && tick - boostTick == 8 && mc.player.getVelocity().horizontalLength() < 0.8) {
                     mc.player.setPitch(-25f); mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND); mc.player.swingHand(Hand.MAIN_HAND); secondRocket = true; return;
                 }
-                if (tick - boostTick > 12 && !mc.player.isOnGround() && mc.player.getVelocity().horizontalLength() > 0.5) { takeoff = Takeoff.DONE; boostTick = tick; fly(); feed("airborne - baritone has the goal"); }
+                if (tick - boostTick > 12 && !mc.player.isOnGround() && mc.player.getVelocity().horizontalLength() > 0.5) { takeoff = Takeoff.DONE; boostTick = tick; fly(); audit("takeoff: airborne, goal handed to baritone"); }
             }
             case DONE -> {
                 if (mc.player.isOnGround()) { takeoff = Takeoff.NONE; return; }                       // glide died before Baritone took it: go around
