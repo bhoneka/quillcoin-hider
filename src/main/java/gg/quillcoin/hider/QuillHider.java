@@ -14,6 +14,7 @@ import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
@@ -138,7 +139,7 @@ public class QuillHider extends Module {
     private float lastHealth;
     private int pendingSlot = -1, pendingNumber;
     private String pendingHash, pendingTitle;
-    private boolean warnedMaps, peeking;
+    private boolean warnedMaps, peeking, hudWasActive = true, hudSuppressed;
     private int peeks;
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private static final SecureRandom RNG = new SecureRandom();
@@ -150,6 +151,7 @@ public class QuillHider extends Module {
 
     @Override
     public void onDeactivate() {
+        if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE;
         spawner = null;
@@ -266,6 +268,13 @@ public class QuillHider extends Module {
         lastHealth = h;
         if (blind.get() && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
         if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
+        // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
+        // while a run is live or the screen is covered, the HUD is simply off. It comes back when the run ends.
+        boolean wantHudOff = run != RunStage.NONE || (blind.get() && mc.player.isGliding());
+        Hud hud = Hud.get();
+        if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
+        else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
+        else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
         if (run == RunStage.FLYING && mc.player.isGliding() && peekKey.get().isPressed() && !peeking) { peeking = true; peeks++; }
         if (!peekKey.get().isPressed()) peeking = false;
         runTick();
@@ -334,7 +343,7 @@ public class QuillHider extends Module {
      * Meteor posts Render2DEvent under an UNSCALED projection: one unit is one framebuffer pixel, not a GUI unit. So the
      * cover is drawn in pixels, and text is drawn under a pushed matrix scaled back up to GUI size.
      */
-    @EventHandler(priority = EventPriority.LOWEST)
+    @EventHandler(priority = EventPriority.LOWEST - 1000)
     private void onRender2D(Render2DEvent event) {
         if (mc.player == null) return;
         int fw = mc.getWindow().getFramebufferWidth(), fh = mc.getWindow().getFramebufferHeight();
@@ -359,7 +368,7 @@ public class QuillHider extends Module {
             if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
         if (feed.get()) {
-            int y = sh - 10 - feedLines.size() * 10;
+            int y = sh - 78 - feedLines.size() * 10;                                   // clear of the hotbar and the bars above it
             String head = "quill " + run.name().toLowerCase() + " / " + stage.name().toLowerCase();
             event.drawContext.drawTextWithShadow(mc.textRenderer, head, sw - 6 - mc.textRenderer.getWidth(head), y - 12, 0xFFE6C85A);
             for (String l : feedLines) {
