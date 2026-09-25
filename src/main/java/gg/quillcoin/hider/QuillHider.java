@@ -99,6 +99,8 @@ public class QuillHider extends Module {
         .name("blind").description("Paint the screen over while gliding and keep F3 off.").defaultValue(true).build());
     private final Setting<Keybind> peekKey = sgBlind.add(new KeybindSetting.Builder()
         .name("peek-key").description("Hold to see the screen while gliding.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_LEFT_ALT)).build());
+    private final Setting<Integer> maxPeeks = sgBlind.add(new IntSetting.Builder()
+        .name("max-peeks").description("Peeks allowed per run (for emergencies). One more than this voids the run.").defaultValue(3).min(0).sliderMax(20).build());
     private final Setting<Boolean> feed = sgBlind.add(new BoolSetting.Builder()
         .name("debug-feed").description("Show the last few things the mod did, bottom right, even over the dark screen. Never a coordinate.").defaultValue(true).build());
     private final Setting<Integer> damageReveal = sgBlind.add(new IntSetting.Builder()
@@ -142,7 +144,7 @@ public class QuillHider extends Module {
     private float lastHealth;
     private int pendingSlot = -1, pendingNumber;
     private String pendingHash, pendingTitle;
-    private boolean warnedMaps, peeking, hudWasActive = true, hudSuppressed;
+    private boolean warnedMaps, peeking, hudWasActive = true, hudSuppressed, elytraWasActive;
     private int savedView = -1;
     private int peeks;
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -300,12 +302,16 @@ public class QuillHider extends Module {
         boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED;
         if (onGroundPhase && savedView == -1) shrinkView();
         else if (!onGroundPhase && savedView != -1) restoreView();
-        boolean wantHudOff = run != RunStage.NONE || (blind.get() && mc.player.isGliding());
+        boolean wantHudOff = run != RunStage.NONE;
         Hud hud = Hud.get();
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
         else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
-        if (run == RunStage.FLYING && mc.player.isGliding() && peekKey.get().isPressed() && !peeking) { peeking = true; peeks++; }
+        if (run == RunStage.FLYING && mc.player.isGliding() && peekKey.get().isPressed() && !peeking) {
+            peeking = true; peeks++;
+            feed("peek " + peeks + "/" + maxPeeks.get());
+            if (peeks > maxPeeks.get()) { audit("peeked more than " + maxPeeks.get() + " times - run void"); run = RunStage.NONE; spawner = null; warn("Too many peeks - the run is void."); }
+        }
         if (!peekKey.get().isPressed()) peeking = false;
         runTick();
 
@@ -361,7 +367,7 @@ public class QuillHider extends Module {
     @EventHandler
     private void onOpenScreen(OpenScreenEvent event) {
         if (mc.player == null) return;
-        if (event.screen instanceof WidgetScreen && (run != RunStage.NONE || (blind.get() && mc.player.isGliding()))) {
+        if (event.screen instanceof WidgetScreen && run != RunStage.NONE) {
             event.cancel();
             audit("meteor gui blocked during the run");
             warn("Meteor's GUI is locked while a run is live.");
@@ -386,7 +392,7 @@ public class QuillHider extends Module {
         int fw = mc.getWindow().getFramebufferWidth(), fh = mc.getWindow().getFramebufferHeight();
         int sw = Math.max(1, mc.getWindow().getScaledWidth()), sh = Math.max(1, mc.getWindow().getScaledHeight());
         float sx = fw / (float) sw, sy = fh / (float) sh;
-        boolean covered = blind.get() && mc.player.isGliding() && tick - lastDamageTick >= damageReveal.get() && !peekKey.get().isPressed();
+        boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding() && tick - lastDamageTick >= damageReveal.get() && !peekKey.get().isPressed();
         if (covered) event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);       // belt and braces: whatever the projection, it's black
         event.drawContext.getMatrices().push();
         event.drawContext.getMatrices().scale(sx, sy, 1f);
@@ -426,9 +432,8 @@ public class QuillHider extends Module {
         if (!me.equals(author.get())) { fail("You are %s, not %s.", me, author.get()); return; }
         try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { fail("Baritone isn't installed."); return; }
         if (run == RunStage.FLYING) {
-            fly();
-            info("Resuming the run. Take off.");
-            feed("resuming");
+            if (!elytraWasActive) { fly(); info("Handing the goal to Baritone again. Take off."); feed("retrying takeoff"); }
+            else info("A run is in the air. Land somewhere that isn't the point (,stop) to void it, or let it finish.");
             return;
         }
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
@@ -440,6 +445,7 @@ public class QuillHider extends Module {
         targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
         spawner = null;
         peeks = 0;
+        elytraWasActive = false;
         run = RunStage.FLYING;
         audit("run started");
         fly();
@@ -471,14 +477,23 @@ public class QuillHider extends Module {
             case FLYING -> {
                 if (dim != World.NETHER) return;
                 double d = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
+                boolean active = elytraActive();
                 if (d <= arriveRadius.get() && !mc.player.isGliding()) {
                     run = RunStage.ARRIVED;
+                    elytraWasActive = false;
                     audit("arrived at the point after " + peeks + " peek(s)");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
-                } else if (!elytraActive() && !mc.player.isGliding() && tick % 600 == 0) {
-                    info("Baritone isn't flying. Press %s to resume the run.", runKey.get());
+                } else if (elytraWasActive && !active && !mc.player.isGliding()) {
+                    // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point
+                    run = RunStage.NONE;
+                    elytraWasActive = false;
+                    audit("flight ended before the point - run void");
+                    warn("The flight ended before the point - the run is void. Press %s for a new one.", runKey.get());
+                } else if (!active && !mc.player.isGliding() && !elytraWasActive && tick % 600 == 0) {
+                    info("Baritone hasn't taken off. Press %s to try again.", runKey.get());
                     feed("baritone idle - press " + runKey.get());
                 }
+                if (active) elytraWasActive = true;
             }
             case OVERWORLD -> {
                 if (dim != World.OVERWORLD || tick - lastScan < 20) return;
