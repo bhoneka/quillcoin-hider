@@ -16,6 +16,8 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
+import meteordevelopment.meteorclient.mixin.ChatHudAccessor;
+import net.minecraft.client.gui.hud.ChatHudLine;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
@@ -117,7 +119,7 @@ public class QuillHider extends Module {
     private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
         .name("test-distance").description("TESTING ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
     private final Setting<Keybind> devSkipKey = sgRun.add(new KeybindSetting.Builder()
-        .name("dev-skip-key").description("TESTING ONLY (needs test-distance > 0 and cheats): teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_END)).build());
+        .name("dev-skip-key").description("Singleplayer test worlds only: teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_END)).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
         .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
@@ -446,7 +448,13 @@ public class QuillHider extends Module {
             else sub = "baritone is searching for a dungeon";
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, sub, cx, cy + 4, 0xFFFFFFFF);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 16, 0xFFAAAAAA);
-            if (run == RunStage.FLYING) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 28, 0xFF666666);
+            if (run == RunStage.FLYING) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop voids the run and gives you your eyes back", cx, cy + 28, 0xFF666666);
+            try {                                                                  // the last few chat lines, redrawn over the black so nothing under it shows
+                java.util.List<ChatHudLine.Visible> lines = ((ChatHudAccessor) mc.inGameHud.getChatHud()).getVisibleMessages();
+                int n = Math.min(8, lines.size());
+                int y = sh - 40 - 9;
+                for (int i = 0; i < n; i++) { event.drawContext.drawTextWithShadow(mc.textRenderer, lines.get(i).content(), 4, y, 0xFFDDDDDD); y -= 9; }
+            } catch (Throwable ignored) { }
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: taking off"
@@ -587,7 +595,7 @@ public class QuillHider extends Module {
     /** Test worlds only: jump to the point without the flight. Feedback is muted so the tp message can't print the coordinates. */
     private void devSkip() {
         if (run != RunStage.FLYING) { fail("Dev skip only works during the flight leg of a run."); return; }
-        if (testRadius.get() <= 0) { fail("Dev skip is only allowed in test mode (test-distance > 0)."); return; }
+        if (!mc.isInSingleplayer()) { fail("Dev skip only works in a singleplayer world."); return; }
         mc.options.jumpKey.setPressed(false);
         takeoff = Takeoff.NONE;
         try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
@@ -616,8 +624,8 @@ public class QuillHider extends Module {
                     elytraWasActive = false;
                     audit("arrived at the point");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
-                } else if (elytraWasActive && !active && !mc.player.isGliding()) {
-                    // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point
+                } else if (elytraWasActive && !active) {
+                    // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point - void now, see now, land yourself
                     run = RunStage.NONE;
                     elytraWasActive = false;
                     audit("flight ended before the point - run void");
