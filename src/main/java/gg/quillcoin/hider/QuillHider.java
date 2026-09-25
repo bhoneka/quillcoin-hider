@@ -16,6 +16,8 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
+import meteordevelopment.meteorclient.mixin.ChatHudAccessor;
+import net.minecraft.client.gui.hud.ChatHudLine;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.orbit.EventHandler;
@@ -427,8 +429,14 @@ public class QuillHider extends Module {
         int sw = Math.max(1, mc.getWindow().getScaledWidth()), sh = Math.max(1, mc.getWindow().getScaledHeight());
         float sx = fw / (float) sw, sy = fh / (float) sh;
         boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding();
-        if (covered) event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);       // belt and braces: whatever the projection, it's black
+        if (covered) {
+            event.drawContext.getMatrices().push();
+            event.drawContext.getMatrices().translate(0, 0, 1000);                    // above the chat (z 50) and anything else already drawn
+            event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);
+            event.drawContext.getMatrices().pop();
+        }
         event.drawContext.getMatrices().push();
+        event.drawContext.getMatrices().translate(0, 0, 1001);
         event.drawContext.getMatrices().scale(sx, sy, 1f);
         if (covered) {
             int rockets = 0;
@@ -447,6 +455,19 @@ public class QuillHider extends Module {
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, sub, cx, cy + 4, 0xFFFFFFFF);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 16, 0xFFAAAAAA);
             if (run == RunStage.FLYING) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop voids the run and gives you your eyes back", cx, cy + 28, 0xFF666666);
+            if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ChatScreen)) {   // chat open = vanilla draws it on top anyway
+                try {
+                    java.util.List<ChatHudLine.Visible> lines = ((ChatHudAccessor) mc.inGameHud.getChatHud()).getVisibleMessages();
+                    float cs = mc.options.getChatScale().getValue().floatValue();
+                    int n = Math.min(8, lines.size());
+                    event.drawContext.getMatrices().push();
+                    event.drawContext.getMatrices().translate(2, sh - 40, 0);
+                    event.drawContext.getMatrices().scale(cs, cs, 1f);
+                    int y = -9;
+                    for (int i = 0; i < n; i++) { event.drawContext.drawTextWithShadow(mc.textRenderer, lines.get(i).content(), 2, y, 0xFFFFFFFF); y -= 9; }
+                    event.drawContext.getMatrices().pop();
+                } catch (Throwable ignored) { }
+            }
 
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
