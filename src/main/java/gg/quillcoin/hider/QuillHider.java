@@ -138,7 +138,8 @@ public class QuillHider extends Module {
     private float lastHealth;
     private int pendingSlot = -1, pendingNumber;
     private String pendingHash, pendingTitle;
-    private boolean warnedMaps;
+    private boolean warnedMaps, peeking;
+    private int peeks;
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private static final SecureRandom RNG = new SecureRandom();
     private static final String ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";   // Crockford base32: no I, L, O, U
@@ -148,7 +149,16 @@ public class QuillHider extends Module {
     }
 
     @Override
+    public void onDeactivate() {
+        if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
+        run = RunStage.NONE;
+        spawner = null;
+        if (stage != Stage.IDLE) { audit("module switched off mid-stash (" + stage.name().toLowerCase() + ")"); stage = Stage.IDLE; }
+    }
+
+    @Override
     public void onActivate() {
+        audit("module on");
         stage = Stage.IDLE;
         run = RunStage.NONE;
         spawner = null;
@@ -159,6 +169,15 @@ public class QuillHider extends Module {
     }
 
     private static File hidesFile() { return new File(MeteorClient.FOLDER, "quillcoin-hides.txt"); }
+    private static File auditFile() { return new File(MeteorClient.FOLDER, "quillcoin-audit.txt"); }
+
+    /** Integrity events, append-only, published with the round. Never a coordinate. */
+    private void audit(String event) {
+        try {
+            Files.writeString(auditFile().toPath(), (System.currentTimeMillis() / 1000) + "," + event + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (Exception ignored) { }
+        feed(event);
+    }
 
     // ------------------------------------------------------------------ the key
 
@@ -246,6 +265,9 @@ public class QuillHider extends Module {
         if (h < lastHealth - 0.01f) lastDamageTick = tick;
         lastHealth = h;
         if (blind.get() && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
+        if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
+        if (run == RunStage.FLYING && mc.player.isGliding() && peekKey.get().isPressed() && !peeking) { peeking = true; peeks++; }
+        if (!peekKey.get().isPressed()) peeking = false;
         runTick();
 
         switch (stage) {
@@ -308,40 +330,45 @@ public class QuillHider extends Module {
 
     // ------------------------------------------------------------------ blind flight
 
+    /**
+     * Meteor posts Render2DEvent under an UNSCALED projection: one unit is one framebuffer pixel, not a GUI unit. So the
+     * cover is drawn in pixels, and text is drawn under a pushed matrix scaled back up to GUI size.
+     */
     @EventHandler(priority = EventPriority.LOWEST)
     private void onRender2D(Render2DEvent event) {
         if (mc.player == null) return;
-        if (run == RunStage.DESIGNATED && !(blind.get() && mc.player.isGliding())) {
-            event.drawContext.drawTextWithShadow(mc.textRenderer, arrow(), 6, 6, 0xFFE6C85A);
-        } else if (run == RunStage.FLYING && !mc.player.isGliding()) {
-            event.drawContext.drawTextWithShadow(mc.textRenderer, "blind run: take off (" + runKey.get() + " to resume)", 6, 6, 0xFFE6C85A);
-        } else if (run == RunStage.ARRIVED) {
-            event.drawContext.drawTextWithShadow(mc.textRenderer, "blind run: build a portal here and go through", 6, 6, 0xFFE6C85A);
-        } else if (run == RunStage.OVERWORLD) {
-            event.drawContext.drawTextWithShadow(mc.textRenderer, "blind run: fly around until a dungeon is found", 6, 6, 0xFFE6C85A);
+        int fw = mc.getWindow().getFramebufferWidth(), fh = mc.getWindow().getFramebufferHeight();
+        int sw = Math.max(1, mc.getWindow().getScaledWidth()), sh = Math.max(1, mc.getWindow().getScaledHeight());
+        float sx = fw / (float) sw, sy = fh / (float) sh;
+        boolean covered = blind.get() && mc.player.isGliding() && tick - lastDamageTick >= damageReveal.get() && !peekKey.get().isPressed();
+        if (covered) event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);       // belt and braces: whatever the projection, it's black
+        event.drawContext.getMatrices().push();
+        event.drawContext.getMatrices().scale(sx, sy, 1f);
+        if (covered) {
+            int rockets = 0;
+            for (int i = 0; i < 36; i++) { ItemStack s = mc.player.getInventory().getStack(i); if (s.isOf(Items.FIREWORK_ROCKET)) rockets += s.getCount(); }
+            int cx = sw / 2, cy = sh / 2;
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 4, 0xFFAAAAAA);
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "hold " + peekKey.get() + " to peek", cx, cy + 16, 0xFF666666);
+        } else {
+            String top = run == RunStage.DESIGNATED ? arrow()
+                : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: take off (" + runKey.get() + " to resume)"
+                : run == RunStage.ARRIVED ? "blind run: build a portal here and go through"
+                : run == RunStage.OVERWORLD ? "blind run: fly around until a dungeon is found" : "";
+            if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
-        if (!blind.get() || !mc.player.isGliding()) return;
-        if (tick - lastDamageTick < damageReveal.get() || peekKey.get().isPressed()) return;
-        event.drawContext.fill(0, 0, event.screenWidth, event.screenHeight, 0xFF000000);
-        int rockets = 0;
-        for (int i = 0; i < 36; i++) { ItemStack s = mc.player.getInventory().getStack(i); if (s.isOf(Items.FIREWORK_ROCKET)) rockets += s.getCount(); }
-        int cx = event.screenWidth / 2, cy = event.screenHeight / 2;
-        event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
-        event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 4, 0xFFAAAAAA);
-        event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "hold " + peekKey.get() + " to peek", cx, cy + 16, 0xFF666666);
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST - 1)
-    private void onRenderFeed(Render2DEvent event) {
-        if (!feed.get() || mc.player == null) return;
-        int y = event.screenHeight - 10 - feedLines.size() * 10;
-        String head = "quill " + run.name().toLowerCase() + " / " + stage.name().toLowerCase();
-        event.drawContext.drawTextWithShadow(mc.textRenderer, head, event.screenWidth - 6 - mc.textRenderer.getWidth(head), y - 12, 0xFFE6C85A);
-        for (String l : feedLines) {
-            String t = l.length() > 60 ? l.substring(0, 59) + "…" : l;
-            event.drawContext.drawTextWithShadow(mc.textRenderer, t, event.screenWidth - 6 - mc.textRenderer.getWidth(t), y, 0xFFCCCCCC);
-            y += 10;
+        if (feed.get()) {
+            int y = sh - 10 - feedLines.size() * 10;
+            String head = "quill " + run.name().toLowerCase() + " / " + stage.name().toLowerCase();
+            event.drawContext.drawTextWithShadow(mc.textRenderer, head, sw - 6 - mc.textRenderer.getWidth(head), y - 12, 0xFFE6C85A);
+            for (String l : feedLines) {
+                String t = l.length() > 60 ? l.substring(0, 59) + "…" : l;
+                event.drawContext.drawTextWithShadow(mc.textRenderer, t, sw - 6 - mc.textRenderer.getWidth(t), y, 0xFFCCCCCC);
+                y += 10;
+            }
         }
+        event.drawContext.getMatrices().pop();
     }
 
     // ------------------------------------------------------------------ the blind run
@@ -364,7 +391,9 @@ public class QuillHider extends Module {
         targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
         targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
         spawner = null;
+        peeks = 0;
         run = RunStage.FLYING;
+        audit("run started");
         fly();
         say("Blind run started - Baritone has a point you will never be shown. Take off; the screen goes dark while you glide.");
     }
@@ -391,6 +420,7 @@ public class QuillHider extends Module {
                 double d = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
                 if (d <= arriveRadius.get() && !mc.player.isGliding()) {
                     run = RunStage.ARRIVED;
+                    audit("arrived at the point after " + peeks + " peek(s)");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
                 } else if (!elytraActive() && !mc.player.isGliding() && tick % 100 == 0) {
                     say("Baritone isn't flying. Press %s to resume the run.", runKey.get());
@@ -403,6 +433,7 @@ public class QuillHider extends Module {
                 if (found != null) {
                     spawner = found;
                     run = RunStage.DESIGNATED;
+                    audit("dungeon designated");
                     say("Dungeon found. Follow the arrow, dig down, put the blocks back, and stash there.");
                 }
             }
@@ -415,6 +446,7 @@ public class QuillHider extends Module {
             double d = Math.hypot(mc.player.getX() - targetNX * 8.0, mc.player.getZ() - targetNZ * 8.0);
             if (d > exitTolerance.get()) {
                 run = RunStage.NONE;
+                audit("portal exit too far from the point - run void");
                 warn("You came out of the portal too far from the run's point - the run is void. Start another.");
             } else {
                 run = RunStage.OVERWORLD;
@@ -517,6 +549,7 @@ public class QuillHider extends Module {
     private void record() {
         long now = System.currentTimeMillis() / 1000;
         boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
+        audit("stashed " + pendingTitle + (blindRun ? " at the end of a blind run" : " WITHOUT a blind run"));
         String line = round.get() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0);
         run = RunStage.NONE;
         spawner = null;

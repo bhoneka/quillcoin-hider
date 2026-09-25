@@ -27,6 +27,13 @@ With `require-blind-run` on (the default), the stash key only works at a dungeon
 
 The point, the spawner's position and your position never leave memory. Any dimension change other than the expected nether-to-overworld voids the run.
 
+## Tamper handling
+The mod cannot stop the person running it from removing it - nothing on your own computer can. What it does is make every deviation
+visible: `meteor-client/quillcoin-audit.txt` is an append-only log (no coordinates) of `module on`, `run started`, `arrived after N peeks`,
+`dungeon designated`, `stashed R1 Coin 37 at the end of a blind run` / `WITHOUT a blind run`, and every reason a run was voided
+(module switched off, blind flight turned off, portal exit too far, dimension change). It is published with each round next to the hash list.
+The hider instance should carry nothing but Meteor, Baritone, performance mods and this addon - no map mods, no HUDs that print coordinates.
+
 ## What it refuses
 - Hiding while logged in as anyone but the configured author.
 - Hiding while a chest-logging module (ChestDump, StashAudit, NetWorth, LayerKit) is on.
