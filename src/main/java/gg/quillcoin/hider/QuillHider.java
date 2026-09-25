@@ -115,6 +115,8 @@ public class QuillHider extends Module {
         .name("site-url").description("Where hashes are posted (POST <url>/api/hide). https://quillcoin.gg resolves to the QuillCoin API. Empty = keep them in the local file only.").defaultValue("https://quillcoin.gg").build());
     private final Setting<String> apiKey = sgGeneral.add(new StringSetting.Builder()
         .name("api-key").description("Bearer token for the site's hider endpoint. Leave empty and put it in meteor-client/quillcoin-key.txt instead, so it never lands in modules.nbt.").defaultValue("").build());
+    private final Setting<Keybind> previewKey = sgGeneral.add(new KeybindSetting.Builder()
+        .name("preview-book-key").description("Singleplayer only: signs a SAMPLE book (fake code, nothing recorded or posted) from the book-and-quill in your hotbar, so the page layout in meteor-client/quillcoin-book.txt can be designed live.").defaultValue(Keybind.none()).build());
     private final Setting<Keybind> stashKey = sgGeneral.add(new KeybindSetting.Builder()
         .name("stash-key").description("With a chest open: sign the book in your hotbar, hash it, put it in the chest.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_P)).build());
 
@@ -366,6 +368,7 @@ public class QuillHider extends Module {
         if (event.action != KeyAction.Press) return;
         if (runKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); startOrResumeRun(); return; }
         if (devSkipKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); devSkip(); return; }
+        if (previewKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); previewBook(); return; }
         if (!stashKey.get().matches(true, event.key, event.modifiers)) return;
         event.cancel();
         if (stage == Stage.RETRY) { retryStash(); return; }
@@ -403,11 +406,8 @@ public class QuillHider extends Module {
         if (number == -1) { fail("Every number in this round is used - raise numbers-per-round."); return; }
         String code = makeCode();
         String title = "R" + effectiveRound() + " Coin " + number;
-        List<String> pages = List.of(
-            code,
-            "This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins."
-        );
         pendingHash = sha256(code);
+        List<String> pages = bookPages(code, title, effectiveRound(), number, pendingHash);
         pendingLoc = sealLocation(code);                              // where we stand, readable by nobody until this code is redeemed
         code = null;                                                  // the code's whole life: made, written, hashed, sealed, gone
         pendingNumber = number;
@@ -889,6 +889,44 @@ public class QuillHider extends Module {
             }
         }
         return sb.toString();                                         // QLL-XXXXX-XXXXX-XXXXX-XXXXX, 100 bits
+    }
+
+    /** Page 1 = the code, page 2 = how to redeem, then whatever meteor-client/quillcoin-book.txt says (pages split by a line "---",
+     *  placeholders {round} {number} {title} {hash8} {quote}; {quote} = a random line of quillcoin-quotes.txt). */
+    private List<String> bookPages(String code, String title, int round, int number, String hash) {
+        List<String> pages = new ArrayList<>();
+        pages.add(code);
+        pages.add("This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins.");
+        try {
+            File tpl = new File(MeteorClient.FOLDER, "quillcoin-book.txt");
+            if (tpl.exists()) {
+                String quote = "";
+                File q = new File(MeteorClient.FOLDER, "quillcoin-quotes.txt");
+                if (q.exists()) {
+                    List<String> quotes = new ArrayList<>();
+                    for (String l : Files.readAllLines(q.toPath(), StandardCharsets.UTF_8)) if (!l.isBlank() && !l.startsWith("#")) quotes.add(l.trim());
+                    if (!quotes.isEmpty()) quote = quotes.get(RNG.nextInt(quotes.size()));
+                }
+                for (String page : Files.readString(tpl.toPath(), StandardCharsets.UTF_8).split("(?m)^---\\s*$")) {
+                    String t = page.replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
+                        .replace("{hash8}", hash.substring(0, 8)).replace("{quote}", quote).strip();
+                    if (!t.isEmpty() && pages.size() < 100) pages.add(t);
+                }
+            }
+        } catch (Exception e) { warn("Couldn't read the book template: %s", e.getMessage()); }
+        return pages;
+    }
+
+    /** Design helper: signs a sample book with a fake code. Singleplayer only, records nothing, posts nothing. */
+    private void previewBook() {
+        if (mc.player == null || mc.world == null) return;
+        if (!mc.isInSingleplayer()) { fail("The sample book only works in a singleplayer world."); return; }
+        int slot = -1;
+        for (int i = 0; i < 9; i++) if (mc.player.getInventory().getStack(i).isOf(Items.WRITABLE_BOOK)) { slot = i; break; }
+        if (slot == -1) { fail("Put a book-and-quill in your hotbar first."); return; }
+        String fake = "QLL-DEMO0-DEMO0-DEMO0-DEMO0";
+        mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(slot, bookPages(fake, "R0 Coin 0", 0, 0, sha256(fake)), Optional.of("R0 Coin 0")));
+        say("Sample book signed in slot %d. Open it. Edit meteor-client/quillcoin-book.txt (pages split by ---) and quillcoin-quotes.txt, then press the key again.", slot + 1);
     }
 
     /** {"x","y","z"} of the player (at the chest), AES-256-GCM with key = SHA-256("quillcoin-loc:" + code), iv||ciphertext||tag, base64. The site stores it blind. */
