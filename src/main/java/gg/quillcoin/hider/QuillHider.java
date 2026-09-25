@@ -96,15 +96,9 @@ public class QuillHider extends Module {
         .name("stash-key").description("With a chest open: sign the book in your hotbar, hash it, put it in the chest.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_P)).build());
 
     private final Setting<Boolean> blind = sgBlind.add(new BoolSetting.Builder()
-        .name("blind").description("Paint the screen over while gliding and keep F3 off.").defaultValue(true).build());
-    private final Setting<Keybind> peekKey = sgBlind.add(new KeybindSetting.Builder()
-        .name("peek-key").description("Hold to see the screen while gliding.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_LEFT_ALT)).build());
-    private final Setting<Integer> maxPeeks = sgBlind.add(new IntSetting.Builder()
-        .name("max-peeks").description("Peeks allowed per run (for emergencies). One more than this voids the run.").defaultValue(3).min(0).sliderMax(20).build());
+        .name("blind").description("Paint the screen over - no exceptions - while gliding on the nether leg of a run, and keep F3 off.").defaultValue(true).build());
     private final Setting<Boolean> feed = sgBlind.add(new BoolSetting.Builder()
         .name("debug-feed").description("Show the last few things the mod did, bottom right, even over the dark screen. Never a coordinate.").defaultValue(true).build());
-    private final Setting<Integer> damageReveal = sgBlind.add(new IntSetting.Builder()
-        .name("damage-reveal").description("Ticks the screen stays visible after you take damage, so you can deal with it.").defaultValue(200).min(0).sliderMax(1200).build());
 
     private final SettingGroup sgRun = settings.createGroup("Blind run");
     private final Setting<Boolean> requireRun = sgRun.add(new BoolSetting.Builder()
@@ -140,13 +134,11 @@ public class QuillHider extends Module {
 
     private enum Stage { IDLE, SIGNING, STASHING, RETRY }
     private Stage stage = Stage.IDLE;
-    private long tick, stageSince, lastDamageTick = -100000;
-    private float lastHealth;
+    private long tick, stageSince;
     private int pendingSlot = -1, pendingNumber;
     private String pendingHash, pendingTitle;
-    private boolean warnedMaps, peeking, hudWasActive = true, hudSuppressed, elytraWasActive;
+    private boolean warnedMaps, hudWasActive = true, hudSuppressed, elytraWasActive;
     private int savedView = -1;
-    private int peeks;
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private static final SecureRandom RNG = new SecureRandom();
     private static final String ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";   // Crockford base32: no I, L, O, U
@@ -174,7 +166,6 @@ public class QuillHider extends Module {
         spawner = null;
         lastDim = mc.world == null ? null : mc.world.getRegistryKey();
         warnedMaps = false;
-        lastHealth = mc.player == null ? 20 : mc.player.getHealth();
         new Thread(this::resync, "quillcoin-resync").start();
     }
 
@@ -291,9 +282,6 @@ public class QuillHider extends Module {
     private void onTick(TickEvent.Post event) {
         tick++;
         if (mc.player == null) return;
-        float h = mc.player.getHealth();
-        if (h < lastHealth - 0.01f) lastDamageTick = tick;
-        lastHealth = h;
         if (blind.get() && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
         if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
         // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
@@ -307,12 +295,6 @@ public class QuillHider extends Module {
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
         else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
-        if (run == RunStage.FLYING && mc.player.isGliding() && peekKey.get().isPressed() && !peeking) {
-            peeking = true; peeks++;
-            feed("peek " + peeks + "/" + maxPeeks.get());
-            if (peeks > maxPeeks.get()) { audit("peeked more than " + maxPeeks.get() + " times - run void"); run = RunStage.NONE; spawner = null; warn("Too many peeks - the run is void."); }
-        }
-        if (!peekKey.get().isPressed()) peeking = false;
         runTick();
 
         switch (stage) {
@@ -392,7 +374,7 @@ public class QuillHider extends Module {
         int fw = mc.getWindow().getFramebufferWidth(), fh = mc.getWindow().getFramebufferHeight();
         int sw = Math.max(1, mc.getWindow().getScaledWidth()), sh = Math.max(1, mc.getWindow().getScaledHeight());
         float sx = fw / (float) sw, sy = fh / (float) sh;
-        boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding() && tick - lastDamageTick >= damageReveal.get() && !peekKey.get().isPressed();
+        boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding();
         if (covered) event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);       // belt and braces: whatever the projection, it's black
         event.drawContext.getMatrices().push();
         event.drawContext.getMatrices().scale(sx, sy, 1f);
@@ -402,7 +384,7 @@ public class QuillHider extends Module {
             int cx = sw / 2, cy = sh / 2;
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 4, 0xFFAAAAAA);
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "hold " + peekKey.get() + " to peek", cx, cy + 16, 0xFF666666);
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 16, 0xFF666666);
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: take off (" + runKey.get() + " to resume)"
@@ -444,7 +426,6 @@ public class QuillHider extends Module {
         targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
         targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
         spawner = null;
-        peeks = 0;
         elytraWasActive = false;
         run = RunStage.FLYING;
         audit("run started");
@@ -481,7 +462,7 @@ public class QuillHider extends Module {
                 if (d <= arriveRadius.get() && !mc.player.isGliding()) {
                     run = RunStage.ARRIVED;
                     elytraWasActive = false;
-                    audit("arrived at the point after " + peeks + " peek(s)");
+                    audit("arrived at the point");
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
                 } else if (elytraWasActive && !active && !mc.player.isGliding()) {
                     // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point

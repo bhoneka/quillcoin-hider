@@ -14,12 +14,12 @@ With a dungeon chest open and a book-and-quill in your hotbar, press the stash k
 ## What the hider never sees
 - The code: it lives in memory between signing and hashing and is never printed, logged or rendered.
 - Coin books: their tooltips are blanked and they cannot be opened while the module is on.
-- Coordinates: nothing this module writes contains one. Blind flight paints the screen over while gliding and keeps F3 off. Use an instance with **no map mods**; the module warns if Xaero is loaded.
+- Coordinates: nothing this module writes contains one. Blind flight paints the screen over while gliding on the run's nether leg - no peek key, no damage reveal - and keeps F3 off. Use an instance with **no map mods**; the module warns if Xaero is loaded.
 
 ## The blind run (0.2)
 With `require-blind-run` on (the default), the stash key only works at a dungeon a blind run led you to:
 
-1. In the nether, press the run key. Stopping the flight anywhere but the point (`,stop`, an emergency landing, no rockets) voids the run; the next press draws a new point. Peeks are for emergencies: more than `max-peeks` in one run voids it. The mod picks a random point - uniform over the ring between `min-ow-radius` and `max-ow-radius` (overworld blocks), scaled to the nether - hands it to Baritone's elytra process through the API (nothing is printed), and you fly. While gliding on this leg the screen is painted over.
+1. In the nether, press the run key. Stopping the flight anywhere but the point (`,stop`, an emergency landing, no rockets) voids the run; the next press draws a new point. The mod picks a random point - uniform over the ring between `min-ow-radius` and `max-ow-radius` (overworld blocks), scaled to the nether - hands it to Baritone's elytra process through the API (nothing is printed), and you fly. While gliding on this leg the screen is painted over with no peek and no exception; if you need to see, `,stop` - you land, you see, the run is void.
 2. Within `arrive-radius` of the point you land; the mod says to build a portal and go through.
 3. Coming out in the overworld, the mod checks you are within `exit-tolerance` of the point; farther, and the run is void.
 4. You fly around; the first dungeon spawner the mod sees (a spawner standing on cobblestone) becomes the run's dungeon. A HUD line gives relative guidance only - "dungeon ahead-left, 140m, 38 down" - never a coordinate.
