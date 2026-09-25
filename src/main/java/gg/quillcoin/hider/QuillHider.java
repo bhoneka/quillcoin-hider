@@ -29,6 +29,8 @@ import net.minecraft.block.entity.MobSpawnerBlockEntity;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
+import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.util.Hand;
 import net.minecraft.world.chunk.WorldChunk;
 import java.util.Map;
 import net.minecraft.client.gui.screen.ingame.BookScreen;
@@ -152,6 +154,7 @@ public class QuillHider extends Module {
     @Override
     public void onDeactivate() {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
+        if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; }
         restoreView();
         restoreAutoJump();
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
@@ -387,9 +390,9 @@ public class QuillHider extends Module {
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "FLYING", cx, cy - 10, 0xFFFFFFFF);
             double left = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
             double spd = Math.hypot(mc.player.getVelocity().x, mc.player.getVelocity().z) * 20;
-            String eta = spd > 5 ? "  ~" + (int) Math.ceil(left / spd / 60) + " min" : "";
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, (int) left + " m left" + eta, cx, cy + 4, 0xFFFFFFFF);
-            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth() + "   " + (int) spd + " b/s", cx, cy + 16, 0xFFAAAAAA);
+            String eta = spd > 5 ? "about " + Math.max(1, (int) Math.ceil(left / spd / 60)) + " min" : "…";   // minutes only: no metres, no speed, no direction
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, eta, cx, cy + 4, 0xFFFFFFFF);
+            event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "rockets " + rockets + "   hp " + (int) mc.player.getHealth(), cx, cy + 16, 0xFFAAAAAA);
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, ",stop lands and voids the run", cx, cy + 28, 0xFF666666);
         } else {
             String top = run == RunStage.DESIGNATED ? arrow()
@@ -420,8 +423,7 @@ public class QuillHider extends Module {
         if (!me.equals(author.get())) { fail("You are %s, not %s.", me, author.get()); return; }
         try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { fail("Baritone isn't installed."); return; }
         if (run == RunStage.FLYING) {
-            if (!elytraWasActive) { fly(); info("Handing the goal to Baritone again. Take off."); feed("retrying takeoff"); }
-            else info("A run is in the air. Land somewhere that isn't the point (,stop) to void it, or let it finish.");
+            info("A run is live. Land somewhere that isn't the point (,stop) to void it, or let it finish.");
             return;
         }
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
@@ -440,6 +442,8 @@ public class QuillHider extends Module {
         }
         spawner = null;
         elytraWasActive = false;
+        takeoff = Takeoff.NONE;
+        takeoffTries = 0;
         run = RunStage.FLYING;
         audit(test ? "run started (TEST: point near the player)" : "run started");
         fly();
@@ -452,11 +456,63 @@ public class QuillHider extends Module {
     private void fly() {
         try {
             if (savedAutoJump == null) savedAutoJump = BaritoneAPI.getSettings().elytraAutoJump.value;
-            BaritoneAPI.getSettings().elytraAutoJump.value = true;                 // Baritone jumps and deploys on its own
+            BaritoneAPI.getSettings().elytraAutoJump.value = false;                // we do the takeoff (Flight+ style); Baritone steers once airborne
             GoalXZ g = new GoalXZ(targetNX, targetNZ);
             BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoal(g);
             BaritoneAPI.getProvider().getPrimaryBaritone().getElytraProcess().pathTo(g);
         } catch (Throwable t) { fail("Couldn't hand the goal to Baritone: %s", t.getMessage()); run = RunStage.NONE; }
+    }
+
+    // ------------------------------------------------------------------ takeoff, Flight+ style: nose up, one tap to hop,
+    // a fresh press on the way down to deploy, a rocket once gliding, then the goal is handed to Baritone in the air
+
+    private enum Takeoff { NONE, JUMPING, BOOST, DONE }
+    private Takeoff takeoff = Takeoff.NONE;
+    private long takeoffSince, boostTick;
+    private int takeoffTries;
+    private boolean jumpTapped, wasAirborne, boostFired, secondRocket;
+
+    private void takeoffTick() {
+        if (takeoff == Takeoff.NONE) {
+            if (++takeoffTries > 4) { run = RunStage.NONE; audit("takeoff failed four times - run void"); warn("Couldn't take off - the run is void. Elytra on, rockets in the hotbar, some room around you."); return; }
+            takeoff = Takeoff.JUMPING; takeoffSince = tick; jumpTapped = wasAirborne = boostFired = secondRocket = false;
+            feed("taking off (" + takeoffTries + ")");
+        }
+        int slot = -1;
+        for (int i = 0; i < 9; i++) if (mc.player.getInventory().getStack(i).isOf(Items.FIREWORK_ROCKET)) { slot = i; break; }
+        if (slot == -1 || !mc.player.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA)) {
+            if (tick % 100 == 0) warn("Need an elytra on and rockets in the hotbar.");
+            return;
+        }
+        if (mc.player.getInventory().selectedSlot != slot) mc.player.getInventory().selectedSlot = slot;
+        mc.player.setPitch(-30f);
+        switch (takeoff) {
+            case JUMPING -> {
+                if (tick - takeoffSince > 200) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; return; }   // try again
+                if (mc.player.isGliding()) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.BOOST; boostFired = false; secondRocket = false; return; }
+                if (mc.player.isOnGround()) {
+                    if (wasAirborne) { jumpTapped = false; wasAirborne = false; }
+                    if (!jumpTapped) { mc.options.jumpKey.setPressed(true); jumpTapped = true; }
+                    else mc.options.jumpKey.setPressed(false);
+                } else {
+                    wasAirborne = true;
+                    mc.options.jumpKey.setPressed(mc.player.getVelocity().y <= 0.08);   // rising: released; apex/fall: fresh press = deploy
+                }
+            }
+            case BOOST -> {
+                if (!mc.player.isGliding()) { if (mc.player.isOnGround()) takeoff = Takeoff.NONE; return; }
+                if (!boostFired) { mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND); mc.player.swingHand(Hand.MAIN_HAND); boostFired = true; boostTick = tick; return; }
+                if (!secondRocket && tick - boostTick == 8 && mc.player.getVelocity().horizontalLength() < 0.8) {
+                    mc.player.setPitch(-25f); mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND); mc.player.swingHand(Hand.MAIN_HAND); secondRocket = true; return;
+                }
+                if (tick - boostTick > 12 && !mc.player.isOnGround() && mc.player.getVelocity().horizontalLength() > 0.5) { takeoff = Takeoff.DONE; boostTick = tick; fly(); feed("airborne - baritone has the goal"); }
+            }
+            case DONE -> {
+                if (mc.player.isOnGround()) { takeoff = Takeoff.NONE; return; }                       // glide died before Baritone took it: go around
+                if (tick - boostTick > 40 && (tick - boostTick) % 40 == 0) fly();                     // Baritone hasn't engaged yet: hand it the goal again
+            }
+            default -> {}
+        }
     }
 
     private boolean elytraActive() {
@@ -483,11 +539,10 @@ public class QuillHider extends Module {
                     elytraWasActive = false;
                     audit("flight ended before the point - run void");
                     warn("The flight ended before the point - the run is void. Press %s for a new one.", runKey.get());
-                } else if (!active && !mc.player.isGliding() && !elytraWasActive && tick % 600 == 0) {
-                    info("Baritone hasn't taken off. Press %s to try again.", runKey.get());
-                    feed("baritone idle - press " + runKey.get());
+                } else if (!active && !elytraWasActive) {
+                    takeoffTick();                                                       // we launch; Baritone steers once it's airborne
                 }
-                if (active) elytraWasActive = true;
+                if (active) { elytraWasActive = true; if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; } }
             }
             case OVERWORLD -> {
                 if (dim != World.OVERWORLD || tick - lastScan < 20) return;
