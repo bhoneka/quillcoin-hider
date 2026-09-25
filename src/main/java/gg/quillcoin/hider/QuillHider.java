@@ -117,7 +117,7 @@ public class QuillHider extends Module {
     private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
         .name("test-distance").description("TESTING ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
     private final Setting<Keybind> devSkipKey = sgRun.add(new KeybindSetting.Builder()
-        .name("dev-skip-key").description("TESTING ONLY (needs test-distance > 0 and cheats): teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_K)).build());
+        .name("dev-skip-key").description("TESTING ONLY (needs test-distance > 0 and cheats): teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_END)).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
         .name("arrive-radius").description("Nether blocks from the point that count as arrived.").defaultValue(300).min(50).sliderMax(2000).build());
     private final Setting<Integer> exitTolerance = sgRun.add(new IntSetting.Builder()
