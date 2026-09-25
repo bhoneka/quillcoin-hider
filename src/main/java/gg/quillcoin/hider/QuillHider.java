@@ -655,8 +655,9 @@ public class QuillHider extends Module {
                 if (active && mc.player.isGliding()) { elytraWasActive = true; if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; } }
             }
             case OVERWORLD -> {
+                if (dim != World.OVERWORLD) { setXray(false, null); return; }
                 setXray(true, null);                                               // nothing but sky, fluids and mobs until a dungeon is in range
-                if (dim != World.OVERWORLD || tick - lastScan < 20) return;
+                if (tick - lastScan < 20) return;
                 lastScan = tick;
                 BlockPos found = nearestDungeonSpawner();
                 if (found != null) {
@@ -669,13 +670,13 @@ public class QuillHider extends Module {
                 } else if (tick % 200 == 0) feed("no dungeon in range - keep walking");
             }
             case DESIGNATED -> {
-                if (dim != World.OVERWORLD || spawner == null) return;
+                if (dim != World.OVERWORLD || spawner == null) { setXray(false, null); return; }
                 setXray(true, spawner);
                 boolean inside = mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get());
                 if (inside && !revealed) { revealed = true; audit("in the dungeon"); say("You're in the dungeon. Open the chest and press %s.", stashKey.get()); }
             }
             case RETURNING -> {
-                setXray(true, null);                                               // the world stays hidden until you're gone
+                setXray(dim == World.OVERWORLD, null);                              // the world stays hidden until you're gone (a dimension change ends it anyway)
                 double d = Math.hypot(mc.player.getX() - stashX, mc.player.getZ() - stashZ);
                 if (d > returnDistance.get()) finishReturn("far from the chest");
             }
@@ -744,6 +745,7 @@ public class QuillHider extends Module {
     /** Relative guidance only: bearing words, distance, depth. Never a coordinate. */
     private String arrow() {
         if (spawner == null || mc.player == null) return "";
+        if (mc.world.getRegistryKey() != World.OVERWORLD) return "run paused - go back through the portal";   // never measure across dimensions
         double dx = spawner.getX() + 0.5 - mc.player.getX(), dz = spawner.getZ() + 0.5 - mc.player.getZ();
         double dist = Math.hypot(dx, dz);
         double bearing = Math.toDegrees(Math.atan2(-dx, dz));                 // minecraft yaw convention
