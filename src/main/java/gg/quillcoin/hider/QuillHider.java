@@ -32,7 +32,9 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import net.minecraft.block.BedBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
-import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.Vec3d;
 import java.util.LinkedHashMap;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.Blocks;
@@ -186,13 +188,32 @@ public class QuillHider extends Module {
 
     // ---------- every block broken during a run gets a ghost outline until the same block is back (memory only, never written)
     private final LinkedHashMap<BlockPos, BlockState> broken = new LinkedHashMap<>();
+    private final LinkedHashMap<BlockPos, BlockState> aimed = new LinkedHashMap<>();   // what the crosshair rested on lately: creative breaks a block before it says so
+
+    private void aimTick() {
+        if (run == RunStage.NONE || mc.world == null) return;
+        if (mc.crosshairTarget instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK) {
+            BlockState st = mc.world.getBlockState(hit.getBlockPos());
+            if (!st.isAir()) { aimed.put(hit.getBlockPos().toImmutable(), st); while (aimed.size() > 64) aimed.remove(aimed.keySet().iterator().next()); }
+            // aiming at a face whose placement spot is a ghost: hold the block that used to be there, if you have it
+            BlockPos place = hit.getBlockPos().offset(hit.getSide());
+            BlockState want = broken.get(place);
+            if (want != null && mc.world.getBlockState(place).isAir()) {
+                net.minecraft.item.Item item = want.getBlock().asItem();
+                for (int i = 0; i < 9; i++) if (mc.player.getInventory().getStack(i).isOf(item)) { if (mc.player.getInventory().selectedSlot != i) mc.player.getInventory().selectedSlot = i; break; }
+            }
+        }
+    }
 
     @EventHandler
     private void onPacketSend(PacketEvent.Send event) {
         if (run == RunStage.NONE || mc.world == null) return;
         if (event.packet instanceof PlayerActionC2SPacket p && p.getAction() == PlayerActionC2SPacket.Action.START_DESTROY_BLOCK) {
-            BlockState st = mc.world.getBlockState(p.getPos());
-            if (!st.isAir() && !broken.containsKey(p.getPos())) broken.put(p.getPos().toImmutable(), st);
+            BlockPos pos = p.getPos().toImmutable();
+            if (broken.containsKey(pos)) return;
+            BlockState st = mc.world.getBlockState(pos);
+            if (st.isAir()) st = aimed.get(pos);                                   // creative already removed it - use what we saw there
+            if (st != null && !st.isAir()) { broken.put(pos, st); feed("ghost kept (" + broken.size() + ")"); }
         }
     }
 
@@ -204,9 +225,18 @@ public class QuillHider extends Module {
 
     private static final SettingColor DUNGEON_COLOR = new SettingColor(230, 200, 90, 230), GHOST_COLOR = new SettingColor(90, 200, 255, 200);
 
+    private static final SettingColor BLACK = new SettingColor(0, 0, 0, 255);
+
+    private boolean covered() { return blind.get() && run == RunStage.FLYING && mc.player != null && mc.player.isGliding(); }
+
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (mc.player == null || run == RunStage.NONE) return;
+        if (covered()) {                                                              // the world pass ends here; chat, hotbar and labels are HUD and land on top
+            Vec3d c = mc.gameRenderer.getCamera().getPos();
+            event.renderer.box(c.x - 2, c.y - 2, c.z - 2, c.x + 2, c.y + 2, c.z + 2, BLACK, BLACK, ShapeMode.Sides, 0);
+            return;
+        }
         if (run == RunStage.DESIGNATED && spawner != null && mc.world.getRegistryKey() == World.OVERWORLD) {
             event.renderer.line(RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z, spawner.getX() + 0.5, spawner.getY() + 0.5, spawner.getZ() + 0.5, DUNGEON_COLOR);
             event.renderer.box(spawner.getX() - 3, spawner.getY() - 1, spawner.getZ() - 3, spawner.getX() + 4, spawner.getY() + 4, spawner.getZ() + 4, DUNGEON_COLOR, DUNGEON_COLOR, ShapeMode.Lines, 0);
@@ -255,7 +285,7 @@ public class QuillHider extends Module {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
         if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; }
         setXray(Xray.OFF, null);
-        broken.clear();
+        broken.clear(); aimed.clear();
         if (run == RunStage.RETURNING) audit("module switched off before leaving the chest - hash posts on next resync");
         restoreView();
         restoreAutoJump();
@@ -408,6 +438,7 @@ public class QuillHider extends Module {
         if (feedbackRestoreTick != 0 && tick >= feedbackRestoreTick) { feedbackRestoreTick = 0; mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback true"); }
         runTick();
         bubbleTick();
+        aimTick();
 
         switch (stage) {
             case SIGNING -> {
@@ -496,16 +527,8 @@ public class QuillHider extends Module {
         int fw = mc.getWindow().getFramebufferWidth(), fh = mc.getWindow().getFramebufferHeight();
         int sw = Math.max(1, mc.getWindow().getScaledWidth()), sh = Math.max(1, mc.getWindow().getScaledHeight());
         float sx = fw / (float) sw, sy = fh / (float) sh;
-        boolean covered = blind.get() && run == RunStage.FLYING && mc.player.isGliding();
-        if (covered) {
-            event.drawContext.draw();                                              // everything drawn so far goes to the screen first
-            RenderSystem.disableDepthTest();                                       // then the cover, ignoring whatever depth the HUD left behind
-            event.drawContext.fill(-fw, -fh, fw * 3, fh * 3, 0xFF000000);
-            event.drawContext.draw();
-            RenderSystem.enableDepthTest();
-        }
+        boolean covered = covered();                                               // the black itself is drawn in the world pass (onRender3D)
         event.drawContext.getMatrices().push();
-        event.drawContext.getMatrices().translate(0, 0, 400);
         event.drawContext.getMatrices().scale(sx, sy, 1f);
         if (covered) {
             int rockets = 0;
