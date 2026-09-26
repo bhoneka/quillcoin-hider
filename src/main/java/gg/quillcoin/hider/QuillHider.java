@@ -913,9 +913,13 @@ public class QuillHider extends Module {
                 boolean hasCode = false;
                 for (String page : Files.readString(tpl.toPath(), StandardCharsets.UTF_8).split("(?m)^---\\s*$")) {
                     if (page.contains("{code}")) hasCode = true;
-                    String t = page.replace("{code}", code).replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
+                    String t = page.replace("{code}", code).replace("{code_lines}", code.substring(0, 16) + "\n" + code.substring(16))
+                        .replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
                         .replace("{hash8}", hash.substring(0, 8)).replace("{date}", date).replace("{year}", String.valueOf(today.getYear()))
-                        .replace("{quote}", quote).replace("{art}", art).strip();
+                        .replace("{quote}", quote).replace("{art}", art);
+                    StringBuilder centred = new StringBuilder();                    // a line starting with ^ is centred on the page
+                    for (String line : t.split("\n", -1)) centred.append(line.startsWith("^") ? centre(line.substring(1)) : line).append('\n');
+                    t = centred.toString().strip();
                     if (!t.isEmpty() && pages.size() < 100) pages.add(t);
                 }
                 if (!hasCode) pages.add(0, code);
@@ -926,6 +930,27 @@ public class QuillHider extends Module {
         pages.add(code);
         pages.add("This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins.");
         return pages;
+    }
+
+    /** Advance width in pixels of a character in Minecraft's default font (ASCII table; everything else is a 9 px unicode glyph). */
+    private static int glyphWidth(char c) {
+        if (c == ' ') return 4;
+        if (c < 32 || c > 126) return 9;
+        switch (c) {
+            case 'i': case '!': case '.': case ',': case ':': case ';': case '|': return 2;
+            case 'l': case '\'': case '`': return 3;
+            case 't': case 'I': case '[': case ']': return 4;
+            case 'f': case 'k': case '"': case '(': case ')': case '{': case '}': case '<': case '>': case '*': return 5;
+            case '@': case '~': return 7;
+            default: return 6;
+        }
+    }
+
+    /** Pads a line with spaces so it sits in the middle of a 114 px book page. Lines wider than the page are left alone. */
+    private static String centre(String line) {
+        int w = 0; for (char c : line.toCharArray()) w += glyphWidth(c);
+        if (w >= 114) return line;
+        return " ".repeat(Math.round((114 - w) / 2f / 4f)) + line;
     }
 
     /** A random non-empty, non-# entry of a text file split by the given regex; "" if the file is missing. */
