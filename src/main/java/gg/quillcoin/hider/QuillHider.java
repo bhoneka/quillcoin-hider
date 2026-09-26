@@ -269,7 +269,8 @@ public class QuillHider extends Module {
 
     private double stashX, stashZ;                                    // where the book went - lives here until you are far away, then gone
     private int pendingRound, pendingNum; private String pendingHashForPost; private long pendingTs; private boolean pendingBlind; private String pendingServer;
-    private String pendingLoc, pendingLocForPost;   // the chest position, AES-256-GCM under a key only the code can derive - never the plain coordinates
+    private String pendingLoc, pendingLocForPost;
+    private int pendingQuoteIdx = -1;   // the chest position, AES-256-GCM under a key only the code can derive - never the plain coordinates
     /** Where https://quillcoin.gg (the default site-url) actually posts: the site itself is static. */
     private static final String API_BASE = "https://ovjeipprgkeygnlkraiu.supabase.co/functions/v1";
     private boolean revealed;
@@ -906,7 +907,7 @@ public class QuillHider extends Module {
         try {
             File tpl = new File(MeteorClient.FOLDER, "quillcoin-book.txt");
             if (tpl.exists()) {
-                String quote = randomEntry(new File(MeteorClient.FOLDER, "quillcoin-quotes.txt"), "\n");
+                String quote = pickQuote(round);
                 String art = randomEntry(new File(MeteorClient.FOLDER, "quillcoin-art.txt"), "(?m)^---\\s*$");
                 java.time.ZonedDateTime nowUtc = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC);
                 java.time.LocalDate today = nowUtc.toLocalDate();
@@ -1036,6 +1037,7 @@ public class QuillHider extends Module {
         } catch (Exception e) { throw new RuntimeException(e); }
     }
 
+    /** Numbers already taken this round: the local hides file AND the site's board, so a lost file can never cause a repeat. */
     private Set<Integer> usedNumbers() {
         Set<Integer> used = new HashSet<>();
         try {
@@ -1044,7 +1046,47 @@ public class QuillHider extends Module {
                 if (p.length >= 2 && Integer.parseInt(p[0].trim()) == effectiveRound()) used.add(Integer.parseInt(p[1].trim()));
             }
         } catch (Exception ignored) { }
+        try {
+            String url = siteUrl.get().trim();
+            if (url.replaceAll("/+$", "").endsWith("quillcoin.gg")) url = API_BASE;
+            if (!url.isEmpty()) {
+                HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/board?round=" + effectiveRound())).timeout(Duration.ofSeconds(8)).GET().build(), HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() == 200) {
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"number\":(\\d+)").matcher(resp.body());
+                    while (m.find()) used.add(Integer.parseInt(m.group(1)));
+                }
+            }
+        } catch (Exception ignored) { }                                              // offline: the local file still rules
         return used;
+    }
+
+    /** Quote indexes already used this round (9th field of the hides file). */
+    private Set<Integer> usedQuotes(int round) {
+        Set<Integer> used = new HashSet<>();
+        try {
+            if (hidesFile().exists()) for (String line : Files.readAllLines(hidesFile().toPath())) {
+                String[] p = line.split(",");
+                if (p.length >= 9 && Integer.parseInt(p[0].trim()) == round && !p[8].trim().isEmpty()) used.add(Integer.parseInt(p[8].trim()));
+            }
+        } catch (Exception ignored) { }
+        return used;
+    }
+
+    /** A quote nobody in this round has yet; only once every quote is taken does one repeat. Remembers the index for the hides line. */
+    private String pickQuote(int round) {
+        pendingQuoteIdx = -1;
+        try {
+            File q = new File(MeteorClient.FOLDER, "quillcoin-quotes.txt");
+            if (!q.exists()) return "";
+            List<String> quotes = new ArrayList<>();
+            for (String l : Files.readAllLines(q.toPath(), StandardCharsets.UTF_8)) if (!l.isBlank() && !l.startsWith("#")) quotes.add(l.trim());
+            if (quotes.isEmpty()) return "";
+            Set<Integer> used = usedQuotes(round);
+            List<Integer> free = new ArrayList<>();
+            for (int i = 0; i < quotes.size(); i++) if (!used.contains(i)) free.add(i);
+            pendingQuoteIdx = free.isEmpty() ? RNG.nextInt(quotes.size()) : free.get(RNG.nextInt(free.size()));
+            return quotes.get(pendingQuoteIdx);
+        } catch (Exception e) { return ""; }
     }
 
     private int drawNumber() {
@@ -1057,12 +1099,12 @@ public class QuillHider extends Module {
         return -1;
     }
 
-    /** round,number,hash,unix-seconds,synced,blind,server,sealed-position - and nothing else, ever. */
+    /** round,number,hash,unix-seconds,synced,blind,server,sealed-position,quote-index - and nothing else, ever. */
     private void record() {
         long now = System.currentTimeMillis() / 1000;
         boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
         audit("stashed " + pendingTitle + (blindRun ? " at the end of a blind run" : " WITHOUT a blind run"));
-        String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName() + "," + (pendingLoc == null ? "" : pendingLoc);
+        String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName() + "," + (pendingLoc == null ? "" : pendingLoc) + "," + (pendingQuoteIdx < 0 ? "" : pendingQuoteIdx);
         stashX = mc.player.getX(); stashZ = mc.player.getZ();
         spawner = null;
         revealed = false;
