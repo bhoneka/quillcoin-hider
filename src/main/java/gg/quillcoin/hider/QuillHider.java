@@ -908,15 +908,17 @@ public class QuillHider extends Module {
             if (tpl.exists()) {
                 String quote = randomEntry(new File(MeteorClient.FOLDER, "quillcoin-quotes.txt"), "\n");
                 String art = randomEntry(new File(MeteorClient.FOLDER, "quillcoin-art.txt"), "(?m)^---\\s*$");
-                java.time.LocalDate today = java.time.LocalDate.now();
+                java.time.ZonedDateTime nowUtc = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC);
+                java.time.LocalDate today = nowUtc.toLocalDate();
                 String date = today.format(java.time.format.DateTimeFormatter.ofPattern("d MMMM yyyy", java.util.Locale.ENGLISH));
+                String time = nowUtc.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")) + " UTC";
                 boolean hasCode = false;
                 for (String page : Files.readString(tpl.toPath(), StandardCharsets.UTF_8).split("(?m)^---\\s*$")) {
                     if (page.contains("{code}") || page.contains("{code_lines}") || page.contains("{code_a}")) hasCode = true;
                     String t = page.replace("{code}", code).replace("{code_lines}", code.substring(0, 16) + "\n" + code.substring(16))
                         .replace("{code_a}", code.substring(0, 16)).replace("{code_b}", code.substring(16))
                         .replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
-                        .replace("{hash8}", hash.substring(0, 8)).replace("{date}", date).replace("{year}", String.valueOf(today.getYear()))
+                        .replace("{hash8}", hash.substring(0, 8)).replace("{date}", date).replace("{time}", time).replace("{year}", String.valueOf(today.getYear()))
                         .replace("{quote}", quote).replace("{art}", art);
                     t = t.replaceAll("&([0-9a-fk-or])", "\u00a7$1");                   // &c &l &r … in the file become real formatting codes
                     StringBuilder laid = new StringBuilder();                       // ^ centres, > right-aligns, left<TAB>right justifies, ║…║ frames
