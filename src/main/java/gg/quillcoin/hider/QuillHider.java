@@ -891,30 +891,49 @@ public class QuillHider extends Module {
         return sb.toString();                                         // QLL-XXXXX-XXXXX-XXXXX-XXXXX, 100 bits
     }
 
-    /** Page 1 = the code, page 2 = how to redeem, then whatever meteor-client/quillcoin-book.txt says (pages split by a line "---",
-     *  placeholders {round} {number} {title} {hash8} {quote}; {quote} = a random line of quillcoin-quotes.txt). */
+    /** The whole book comes from meteor-client/quillcoin-book.txt: pages split by a line "---", placeholders {code} {title} {round} {number}
+     *  {hash8} {date} {year} {quote} {art}. {quote} = a random line of quillcoin-quotes.txt, {art} = a random page of quillcoin-art.txt.
+     *  A template without {code} gets the code as page 1. No template at all = code page + a how-to-redeem page. */
     private List<String> bookPages(String code, String title, int round, int number, String hash) {
         List<String> pages = new ArrayList<>();
-        pages.add(code);
-        pages.add("This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins.");
         try {
             File tpl = new File(MeteorClient.FOLDER, "quillcoin-book.txt");
             if (tpl.exists()) {
-                String quote = "";
-                File q = new File(MeteorClient.FOLDER, "quillcoin-quotes.txt");
-                if (q.exists()) {
-                    List<String> quotes = new ArrayList<>();
-                    for (String l : Files.readAllLines(q.toPath(), StandardCharsets.UTF_8)) if (!l.isBlank() && !l.startsWith("#")) quotes.add(l.trim());
-                    if (!quotes.isEmpty()) quote = quotes.get(RNG.nextInt(quotes.size()));
-                }
+                String quote = randomEntry(new File(MeteorClient.FOLDER, "quillcoin-quotes.txt"), "\n");
+                String art = randomEntry(new File(MeteorClient.FOLDER, "quillcoin-art.txt"), "(?m)^---\\s*$");
+                java.time.LocalDate today = java.time.LocalDate.now();
+                String date = today.format(java.time.format.DateTimeFormatter.ofPattern("d MMMM yyyy", java.util.Locale.ENGLISH));
+                boolean hasCode = false;
                 for (String page : Files.readString(tpl.toPath(), StandardCharsets.UTF_8).split("(?m)^---\\s*$")) {
-                    String t = page.replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
-                        .replace("{hash8}", hash.substring(0, 8)).replace("{quote}", quote).strip();
+                    if (page.contains("{code}")) hasCode = true;
+                    String t = page.replace("{code}", code).replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
+                        .replace("{hash8}", hash.substring(0, 8)).replace("{date}", date).replace("{year}", String.valueOf(today.getYear()))
+                        .replace("{quote}", quote).replace("{art}", art).strip();
                     if (!t.isEmpty() && pages.size() < 100) pages.add(t);
                 }
+                if (!hasCode) pages.add(0, code);
+                if (!pages.isEmpty()) return pages;
             }
         } catch (Exception e) { warn("Couldn't read the book template: %s", e.getMessage()); }
+        pages.clear();
+        pages.add(code);
+        pages.add("This book is one QuillCoin.\n\nRedeem the code on the first page at\nquillcoin.gg\n\nFirst redemption wins.");
         return pages;
+    }
+
+    /** A random non-empty, non-# entry of a text file split by the given regex; "" if the file is missing. */
+    private String randomEntry(File f, String splitRegex) {
+        try {
+            if (!f.exists()) return "";
+            List<String> entries = new ArrayList<>();
+            for (String e : Files.readString(f.toPath(), StandardCharsets.UTF_8).split(splitRegex)) {
+                StringBuilder keep = new StringBuilder();
+                for (String line : e.split("\n")) if (!line.startsWith("#")) keep.append(line).append('\n');
+                String t = keep.toString().strip();
+                if (!t.isEmpty()) entries.add(t);
+            }
+            return entries.isEmpty() ? "" : entries.get(RNG.nextInt(entries.size()));
+        } catch (Exception e) { return ""; }
     }
 
     /** Design helper: signs a sample book with a fake code. Singleplayer only, records nothing, posts nothing. */
@@ -926,7 +945,7 @@ public class QuillHider extends Module {
         if (slot == -1) { fail("Put a book-and-quill in your hotbar first."); return; }
         String fake = "QLL-DEMO0-DEMO0-DEMO0-DEMO0";
         mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(slot, bookPages(fake, "R0 Coin 0", 0, 0, sha256(fake)), Optional.of("R0 Coin 0")));
-        say("Sample book signed in slot %d. Open it. Edit meteor-client/quillcoin-book.txt (pages split by ---) and quillcoin-quotes.txt, then press the key again.", slot + 1);
+        say("Sample book signed in slot %d. Open it. Edit meteor-client/quillcoin-book.txt, quillcoin-quotes.txt or quillcoin-art.txt, then press the key again.", slot + 1);
     }
 
     /** {"x","y","z"} of the player (at the chest), AES-256-GCM with key = SHA-256("quillcoin-loc:" + code), iv||ciphertext||tag, base64. The site stores it blind. */
