@@ -917,9 +917,9 @@ public class QuillHider extends Module {
                         .replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
                         .replace("{hash8}", hash.substring(0, 8)).replace("{date}", date).replace("{year}", String.valueOf(today.getYear()))
                         .replace("{quote}", quote).replace("{art}", art);
-                    StringBuilder centred = new StringBuilder();                    // a line starting with ^ is centred on the page
-                    for (String line : t.split("\n", -1)) centred.append(line.startsWith("^") ? centre(line.substring(1)) : line).append('\n');
-                    t = centred.toString().strip();
+                    StringBuilder laid = new StringBuilder();                       // ^ centres a line, > right-aligns it, ║…║ pads a framed line to the page edge
+                    for (String line : t.split("\n", -1)) laid.append(layout(line)).append('\n');
+                    t = laid.toString().strip();
                     if (!t.isEmpty() && pages.size() < 100) pages.add(t);
                 }
                 if (!hasCode) pages.add(0, code);
@@ -946,11 +946,20 @@ public class QuillHider extends Module {
         }
     }
 
-    /** Pads a line with spaces so it sits in the middle of a 114 px book page. Lines wider than the page are left alone. */
-    private static String centre(String line) {
-        int w = 0; for (char c : line.toCharArray()) w += glyphWidth(c);
-        if (w >= 114) return line;
-        return " ".repeat(Math.round((114 - w) / 2f / 4f)) + line;
+    private static int textWidth(String line) { int w = 0; for (char c : line.toCharArray()) w += glyphWidth(c); return w; }
+
+    /** Page layout for one template line. A 4 px space is the finest unit, so edges can wobble by a pixel or two - that is the genre. */
+    private static String layout(String line) {
+        if (line.length() >= 2 && line.startsWith("║") && line.endsWith("║")) {     // framed: content sits between the two bars, padded out to the right bar
+            String inner = line.substring(1, line.length() - 1); int mode = 0;
+            if (inner.startsWith("^")) { mode = 1; inner = inner.substring(1); } else if (inner.startsWith(">")) { mode = 2; inner = inner.substring(1); }
+            int pad = Math.max(0, (114 - 18 - textWidth(inner)) / 4);
+            int left = mode == 1 ? pad / 2 : mode == 2 ? pad : 0;
+            return "║" + " ".repeat(left) + inner + " ".repeat(pad - left) + "║";
+        }
+        if (line.startsWith("^")) { String t = line.substring(1); int w = textWidth(t); return w >= 114 ? t : " ".repeat(Math.round((114 - w) / 2f / 4f)) + t; }
+        if (line.startsWith(">")) { String t = line.substring(1); int w = textWidth(t); return w >= 114 ? t : " ".repeat((114 - w) / 4) + t; }
+        return line;
     }
 
     /** A random non-empty, non-# entry of a text file split by the given regex; "" if the file is missing. */
