@@ -912,12 +912,14 @@ public class QuillHider extends Module {
                 String date = today.format(java.time.format.DateTimeFormatter.ofPattern("d MMMM yyyy", java.util.Locale.ENGLISH));
                 boolean hasCode = false;
                 for (String page : Files.readString(tpl.toPath(), StandardCharsets.UTF_8).split("(?m)^---\\s*$")) {
-                    if (page.contains("{code}")) hasCode = true;
+                    if (page.contains("{code}") || page.contains("{code_lines}") || page.contains("{code_a}")) hasCode = true;
                     String t = page.replace("{code}", code).replace("{code_lines}", code.substring(0, 16) + "\n" + code.substring(16))
+                        .replace("{code_a}", code.substring(0, 16)).replace("{code_b}", code.substring(16))
                         .replace("{round}", String.valueOf(round)).replace("{number}", String.valueOf(number)).replace("{title}", title)
                         .replace("{hash8}", hash.substring(0, 8)).replace("{date}", date).replace("{year}", String.valueOf(today.getYear()))
                         .replace("{quote}", quote).replace("{art}", art);
-                    StringBuilder laid = new StringBuilder();                       // ^ centres a line, > right-aligns it, ║…║ pads a framed line to the page edge
+                    t = t.replaceAll("&([0-9a-fk-or])", "\u00a7$1");                   // &c &l &r … in the file become real formatting codes
+                    StringBuilder laid = new StringBuilder();                       // ^ centres, > right-aligns, left<TAB>right justifies, ║…║ frames
                     for (String line : t.split("\n", -1)) laid.append(layout(line)).append('\n');
                     t = laid.toString().strip();
                     if (!t.isEmpty() && pages.size() < 100) pages.add(t);
@@ -935,7 +937,9 @@ public class QuillHider extends Module {
     /** Advance width in pixels of a character in Minecraft's default font (ASCII table; everything else is a 9 px unicode glyph). */
     private static int glyphWidth(char c) {
         if (c == ' ') return 4;
-        if (c < 32 || c > 126) return 9;
+        if (c == '\u00b7' || c == '\u00a1' || c == '\u00a6') return 2;              // · ¡ ¦
+        if (c >= 0xA0 && c <= 0xFF) return 6;                                        // accented latin, ÷ ï and friends
+        if (c < 32 || c > 126) return 9;                                             // box drawing, blocks: unifont
         switch (c) {
             case 'i': case '!': case '.': case ',': case ':': case ';': case '|': return 2;
             case 'l': case '\'': case '`': return 3;
@@ -946,17 +950,34 @@ public class QuillHider extends Module {
         }
     }
 
-    private static int textWidth(String line) { int w = 0; for (char c : line.toCharArray()) w += glyphWidth(c); return w; }
+    /** Width in pixels as the book will draw it: formatting codes are free, bold adds a pixel per glyph, a colour code ends bold. */
+    private static int textWidth(String line) {
+        int w = 0; boolean bold = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '\u00a7' && i + 1 < line.length()) { char f = Character.toLowerCase(line.charAt(++i)); if (f == 'l') bold = true; else if (f == 'r' || (f >= '0' && f <= '9') || (f >= 'a' && f <= 'f')) bold = false; continue; }
+            w += glyphWidth(c) + (bold ? 1 : 0);
+        }
+        return w;
+    }
+
+    /** "left<TAB>right": spaces between the parts push them to the two edges of the given width. */
+    private static String justify(String left, String right, int width) {
+        int pad = Math.max(1, (width - textWidth(left) - textWidth(right)) / 4);
+        return left + " ".repeat(pad) + right;
+    }
 
     /** Page layout for one template line. A 4 px space is the finest unit, so edges can wobble by a pixel or two - that is the genre. */
     private static String layout(String line) {
         if (line.length() >= 2 && line.startsWith("║") && line.endsWith("║")) {     // framed: content sits between the two bars, padded out to the right bar
             String inner = line.substring(1, line.length() - 1); int mode = 0;
             if (inner.startsWith("^")) { mode = 1; inner = inner.substring(1); } else if (inner.startsWith(">")) { mode = 2; inner = inner.substring(1); }
+            if (inner.contains("\t")) { String[] lr = inner.split("\t", 2); return "║" + justify(lr[0], lr[1], 114 - 18) + "║"; }
             int pad = Math.max(0, (114 - 18 - textWidth(inner)) / 4);
             int left = mode == 1 ? pad / 2 : mode == 2 ? pad : 0;
             return "║" + " ".repeat(left) + inner + " ".repeat(pad - left) + "║";
         }
+        if (line.contains("\t")) { String[] lr = line.split("\t", 2); return justify(lr[0], lr[1], 114); }
         if (line.startsWith("^")) { String t = line.substring(1); int w = textWidth(t); return w >= 114 ? t : " ".repeat(Math.round((114 - w) / 2f / 4f)) + t; }
         if (line.startsWith(">")) { String t = line.substring(1); int w = textWidth(t); return w >= 114 ? t : " ".repeat((114 - w) / 4) + t; }
         return line;
