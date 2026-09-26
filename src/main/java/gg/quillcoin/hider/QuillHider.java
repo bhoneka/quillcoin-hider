@@ -515,6 +515,7 @@ public class QuillHider extends Module {
 
     @EventHandler
     private void onTooltip(ItemStackTooltipEvent event) {
+        if (mc.isInSingleplayer()) return;                                            // singleplayer books are test or sample books: readable, so they can be designed
         if (!isCoinBook(event.itemStack())) return;
         event.list().clear();
         event.list().add(Text.literal("QuillCoin book - contents hidden"));
@@ -529,7 +530,7 @@ public class QuillHider extends Module {
             warn("Meteor's GUI is locked while a run is live.");
             return;
         }
-        if (!(event.screen instanceof BookScreen)) return;
+        if (!(event.screen instanceof BookScreen) || mc.isInSingleplayer()) return;
         if (isCoinBook(mc.player.getMainHandStack()) || isCoinBook(mc.player.getOffHandStack())) {
             event.cancel();
             warn("That's a coin book. Not showing it.");
