@@ -539,6 +539,12 @@ public class QuillHider extends Module {
 
     // ------------------------------------------------------------------ blind flight
 
+    /** Runs before anything else draws a frame: while a run is live the HUD is off for THIS frame, whatever key was just pressed. */
+    @EventHandler(priority = EventPriority.HIGHEST + 1000)
+    private void onRender2DFirst(Render2DEvent event) {
+        if (run != RunStage.NONE && Hud.get().active) Hud.get().active = false;
+    }
+
     /**
      * Meteor posts Render2DEvent under an UNSCALED projection: one unit is one framebuffer pixel, not a GUI unit. So the
      * cover is drawn in pixels, and text is drawn under a pushed matrix scaled back up to GUI size.
