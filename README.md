@@ -37,6 +37,12 @@ For a real round the mod reads that ring when the run key is pressed and draws i
 - the round is already open: the run does not start, and the stash key refuses too, so no book is ever left in a chest without a coin behind it;
 - `test-distance` is refused for a real round.
 
+**Overworld ring, nether flight.** A ring is given in overworld blocks. The point is drawn from it evenly by area and then divided by eight: a ring of 15,000 to 50,000 is a flight to somewhere 1,875 to 6,250 blocks from the nether's 0,0.
+
+**The book ends up inside the ring, not just the point.** The landing and the portal can be a long way off the point, so the draw keeps `exit-tolerance` blocks away from both edges of the ring. On the ground, a dungeon outside the ring is never chosen as the run's dungeon, and for a real round the stash key checks the chest's own distance from spawn and refuses outside the ring.
+
+**Never a short flight.** The point is at least `min-flight` nether blocks (1,000 by default) from where the run starts. The black screen shows how long the flight takes; a flight of a few seconds would tell the hider that the book is next door.
+
 `min-ow-radius` and `max-ow-radius` only apply to round 0, the test round. The ring that was used is written to the audit log (`run started (ring 15000-50000 from the site)`); a ring is public, a point never is.
 
 ## Tamper handling

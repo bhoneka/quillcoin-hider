@@ -136,6 +136,8 @@ public class QuillHider extends Module {
         .name("max-ow-radius").description("ROUND 0 ONLY (a real round uses the ring the site publishes). Farthest the random point may be from 0,0 - in OVERWORLD blocks (nether flight is an eighth of it).").defaultValue(50000).min(1000).sliderMax(5000000).build());
     private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
         .name("test-distance").description("TESTING ONLY, ROUND 0 ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
+    private final Setting<Integer> minFlight = sgRun.add(new IntSetting.Builder()
+        .name("min-flight").description("The point is never closer than this many NETHER blocks to where you stand when the run starts, so a short flight can never tell you where the book is. 0 = off.").defaultValue(1000).min(0).sliderMax(5000).build());
     private final Setting<Keybind> devSkipKey = sgRun.add(new KeybindSetting.Builder()
         .name("dev-skip-key").description("Singleplayer test worlds only: teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_J)).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
@@ -408,6 +410,13 @@ public class QuillHider extends Module {
         if (effectiveRound() >= 1) {
             if (lastBoard == null) { fail("Couldn't reach the site - a real book is never hidden without it. Press the key again."); return; }
             if (roundIsOpen(lastBoard, System.currentTimeMillis())) { audit("stash refused: round " + effectiveRound() + " is already open"); fail("Round %d is already open - nothing can be added to it.", effectiveRound()); return; }
+            int[] ring = parseRing(lastBoard);
+            if (ring == null || !inRing(mc.player.getX(), mc.player.getZ(), ring[0], ring[1])) {
+                audit("stash refused: this chest is outside round " + effectiveRound() + "'s ring - run void");
+                run = RunStage.NONE; spawner = null;
+                fail("This chest is outside round %d's ring - nothing is hidden here, and the run is void. Start another.", effectiveRound());
+                return;
+            }
         }
         String code = makeCode();
         String title = "R" + effectiveRound() + " Coin " + number;
@@ -651,20 +660,43 @@ public class QuillHider extends Module {
     }
 
     private volatile boolean ringLoading;
+    /** The ring this run has to end in, in overworld blocks from spawn. A ring is public; the point inside it never is. */
+    private double ringLo = 0, ringHi = Double.MAX_VALUE;
+
+    /**
+     * A point in the NETHER for a ring given in OVERWORLD blocks: the ring is drawn from evenly by area, then divided by eight.
+     * The draw keeps `margin` blocks away from both edges, because the landing and the portal can be that far off the point
+     * and the book still has to end up inside the ring. It also stays `minFlight` nether blocks away from where the run starts.
+     * Returns {x, z} in nether blocks, or null when no such point is found.
+     */
+    static int[] drawPoint(double lo, double hi, double margin, double startNX, double startNZ, double minFlight, java.util.Random rng) {
+        double m = Math.max(0, Math.min(margin, (hi - lo) / 4.0)), a0 = lo + m, b0 = hi - m;
+        for (int tries = 0; tries < 2000; tries++) {
+            double a = rng.nextDouble() * Math.PI * 2, r = Math.sqrt(a0 * a0 + rng.nextDouble() * (b0 * b0 - a0 * a0));
+            int nx = (int) Math.round(r * Math.cos(a) / 8.0), nz = (int) Math.round(r * Math.sin(a) / 8.0);
+            if (Math.hypot(nx - startNX, nz - startNZ) >= minFlight) return new int[]{nx, nz};
+        }
+        return null;
+    }
+
+    static boolean inRing(double x, double z, double lo, double hi) { double d = Math.hypot(x, z); return d >= lo && d <= hi; }
 
     /** Draws the point, uniform over the ring between lo and hi (overworld blocks, scaled to the nether), and hands it to Baritone. */
-    private void beginRun(double lo, double hi, boolean test, String how) {
+    private void beginRun(double lo, double hi, boolean test, String how0) {
+        String how = how0;
         if (mc.world == null || mc.player == null || mc.world.getRegistryKey() != World.NETHER) { fail("Blind runs start in the nether."); return; }
         if (run != RunStage.NONE) return;
-        double a = RNG.nextDouble() * Math.PI * 2;
         if (test) {
-            double r = testRadius.get() * (0.8 + RNG.nextDouble() * 0.4);
+            double a = RNG.nextDouble() * Math.PI * 2, r = testRadius.get() * (0.8 + RNG.nextDouble() * 0.4);
             targetNX = (int) Math.round(mc.player.getX() + r * Math.cos(a));
             targetNZ = (int) Math.round(mc.player.getZ() + r * Math.sin(a));
+            ringLo = 0; ringHi = Double.MAX_VALUE;
         } else {
-            double r = Math.sqrt(lo * lo + RNG.nextDouble() * (hi * hi - lo * lo));
-            targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
-            targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
+            int[] t = drawPoint(lo, hi, exitTolerance.get(), mc.player.getX(), mc.player.getZ(), minFlight.get(), RNG);
+            if (t == null) { fail("No point in the ring is %d nether blocks away from here. Start the run somewhere else, or lower min-flight.", minFlight.get()); return; }
+            targetNX = t[0]; targetNZ = t[1];
+            ringLo = lo; ringHi = hi;
+            how += minFlight.get() > 0 ? ", at least " + minFlight.get() + " nether blocks from the start" : "";
         }
         spawner = null;
         elytraWasActive = false;
@@ -900,6 +932,7 @@ public class QuillHider extends Module {
                 BlockPos p = e.getKey();
                 var below = mc.world.getBlockState(p.down());
                 if (!below.isOf(Blocks.COBBLESTONE) && !below.isOf(Blocks.MOSSY_COBBLESTONE)) continue;
+                if (!inRing(p.getX() + 0.5, p.getZ() + 0.5, ringLo, ringHi)) continue;        // a dungeon outside the round's ring is never the run's dungeon
                 double d = p.getSquaredDistance(mc.player.getPos());
                 if (d < bestD) { bestD = d; best = p.toImmutable(); }
             }
