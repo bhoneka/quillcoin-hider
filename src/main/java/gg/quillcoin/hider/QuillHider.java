@@ -59,6 +59,8 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.BookUpdateC2SPacket;
+import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
+import meteordevelopment.meteorclient.events.entity.player.InteractBlockEvent;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -294,7 +296,7 @@ public class QuillHider extends Module {
     private void warn(String fmt, Object... a) { String m = String.format(fmt, a); warning(m); feed("! " + m); }
     private void fail(String fmt, Object... a) { String m = String.format(fmt, a); error(m); feed("X " + m); }
 
-    private enum Stage { IDLE, SIGNING, STASHING, RETRY }
+    private enum Stage { IDLE, PREPARE, SIGNING, REOPENING, STASHING, RETRY }
     private Stage stage = Stage.IDLE;
     private long tick, stageSince;
     private int pendingSlot = -1, pendingNumber;
@@ -469,17 +471,71 @@ public class QuillHider extends Module {
         String code = makeCode();
         String title = "R" + effectiveRound() + " Coin " + number;
         pendingHash = sha256(code);
-        List<String> pages = bookPages(code, title, effectiveRound(), number, pendingHash);
+        pendingPages = bookPages(code, title, effectiveRound(), number, pendingHash);
+        pendingPlain = plainPages(pendingPages);                      // the same book without colours or ornaments, in case the server refuses those
         pendingLoc = sealLocation(code);                              // where we stand, readable by nobody until this code is redeemed
         code = null;                                                  // the code's whole life: made, written, hashed, sealed, gone
         pendingNumber = number;
         pendingTitle = title;
         pendingSlot = slot;
-        mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(slot, pages, Optional.of(title)));
-        feed("code made + hashed, asking the server to sign");
+        signTry = 0;
+        // A server only signs a book the way a player can sign one: held in the hand, with no chest open.
+        // So: close the chest, take the book in hand, sign, open the same chest again, put the book in.
+        chestToReopen = lastChest;
+        mc.player.closeHandledScreen();
+        mc.player.getInventory().selectedSlot = slot;
+        mc.getNetworkHandler().sendPacket(new UpdateSelectedSlotC2SPacket(slot));
+        feed("code made + hashed, book in hand");
+        stage = Stage.PREPARE;
+        stageSince = tick;
+    }
+
+    private List<String> pendingPages, pendingPlain;
+    private int signTry;
+    private BlockHitResult lastChest, chestToReopen;
+
+    /** The chest that was opened last, so the mod can open the same one again after the book is signed. */
+    @EventHandler
+    private void onInteractBlock(InteractBlockEvent event) {
+        if (mc.world == null || event.result == null) return;
+        var state = mc.world.getBlockState(event.result.getBlockPos());
+        if (state.isOf(Blocks.CHEST) || state.isOf(Blocks.TRAPPED_CHEST)) lastChest = event.result;
+    }
+
+    /** The same pages with formatting codes removed and every ornament replaced by a plain character. */
+    static List<String> plainPages(List<String> pages) {
+        List<String> out = new ArrayList<>();
+        for (String page : pages) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < page.length(); i++) {
+                char c = page.charAt(i);
+                if (c == '\u00a7') { i++; continue; }                                 // a formatting code and its letter
+                if (c < 127) { sb.append(c); continue; }
+                switch (c) {
+                    case '\u2550' -> sb.append('=');
+                    case '\u2554', '\u2557', '\u255a', '\u255d', '\u2566', '\u2569' -> sb.append('+');
+                    case '\u2748', '\u2735' -> sb.append('*');
+                    case '\u00b7' -> sb.append('.');
+                    case '\u00a9' -> sb.append("(c)");
+                    case '\u2026' -> sb.append("...");
+                    case '\u2014', '\u2013' -> sb.append('-');
+                    case '\u2018', '\u2019' -> sb.append('\'');
+                    case '\u201c', '\u201d' -> sb.append('"');
+                    default -> sb.append(' ');
+                }
+            }
+            out.add(sb.toString());
+        }
+        return out;
+    }
+
+    private void sendSign(List<String> pages) {
+        mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(mc.player.getInventory().selectedSlot, pages, Optional.of(pendingTitle)));
         stage = Stage.SIGNING;
         stageSince = tick;
     }
+
+    private void forgetPages() { pendingPages = null; pendingPlain = null; }
 
     private void retryStash() {
         if (!(mc.currentScreen instanceof HandledScreen<?> hs) || !(hs.getScreenHandler() instanceof GenericContainerScreenHandler handler)) {
@@ -525,22 +581,57 @@ public class QuillHider extends Module {
         aimTick();
 
         switch (stage) {
+            case PREPARE -> {
+                if (mc.player.getInventory().selectedSlot != pendingSlot || !mc.player.getInventory().getStack(pendingSlot).isOf(Items.WRITABLE_BOOK)) {
+                    stage = Stage.IDLE; forgetPages();
+                    fail("The book-and-quill left your hand. Nothing was hidden; the number is free again.");
+                } else if (tick - stageSince >= 6) {                                 // the server has seen the chest close and the slot change
+                    feed("asking the server to sign");
+                    sendSign(pendingPages);
+                }
+            }
             case SIGNING -> {
                 ItemStack st = mc.player.getInventory().getStack(pendingSlot);
                 if (isCoinBook(st)) {
-                    feed("server signed the book");
-                    if (mc.currentScreen instanceof HandledScreen<?> hs && hs.getScreenHandler() instanceof GenericContainerScreenHandler handler) {
+                    audit(signTry == 0 ? "the server signed the book" : "the server signed the book as plain text (it would not take the decorated pages)");
+                    forgetPages();
+                    if (chestToReopen != null) {
+                        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, chestToReopen);
+                        mc.player.swingHand(Hand.MAIN_HAND);
+                        feed("opening the chest again");
+                        stage = Stage.REOPENING;
+                        stageSince = tick;
+                    } else {
+                        stage = Stage.RETRY;
+                        warn("Book signed. Open the chest and press %s - and do not open the book.", stashKey.get());
+                    }
+                } else if (tick - stageSince > 100) {
+                    if (signTry == 0 && pendingPlain != null && st.isOf(Items.WRITABLE_BOOK)) {
+                        signTry = 1;
+                        audit("the server did not sign the decorated pages - trying the same book as plain text");
+                        sendSign(pendingPlain);
+                    } else {
+                        stage = Stage.IDLE; forgetPages();
+                        audit("the server did not sign the book - nothing hidden");
+                        fail("The server didn't sign the book. Nothing was hidden; the number is free again.");
+                    }
+                }
+            }
+            case REOPENING -> {
+                if (mc.currentScreen instanceof HandledScreen<?> hs && hs.getScreenHandler() instanceof GenericContainerScreenHandler handler) {
+                    Inventory chest = handler.getInventory();
+                    boolean room = false;
+                    for (int i = 0; i < chest.size(); i++) if (chest.getStack(i).isEmpty()) { room = true; break; }
+                    if (!room) { stage = Stage.RETRY; warn("That chest is full now. Open a chest with room and press %s. Do not open the book.", stashKey.get()); }
+                    else if (tick - stageSince >= 4) {                               // give the chest's contents a moment to arrive
                         quickMove(handler, pendingSlot);
                         feed("moving it into the chest");
                         stage = Stage.STASHING;
                         stageSince = tick;
-                    } else {
-                        stage = Stage.RETRY;
-                        warn("Book signed but the chest closed. Open a chest and press the key - and do not open the book.");
                     }
                 } else if (tick - stageSince > 60) {
-                    stage = Stage.IDLE;
-                    fail("The server didn't sign the book. Nothing was hidden; the number is free again.");
+                    stage = Stage.RETRY;
+                    warn("Book signed, but the chest did not open again. Open it and press %s - and do not open the book.", stashKey.get());
                 }
             }
             case STASHING -> {
