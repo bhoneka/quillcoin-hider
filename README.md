@@ -19,7 +19,7 @@ With a dungeon chest open and a book-and-quill in your hotbar, press the stash k
 ## The blind run (0.2)
 With `require-blind-run` on (the default), the stash key only works at a dungeon a blind run led you to:
 
-1. In the nether, press the run key. Stopping the flight anywhere but the point (`,stop`, an emergency landing, no rockets) voids the run; the next press draws a new point. The mod picks a random point - uniform over the ring between `min-ow-radius` and `max-ow-radius` (overworld blocks), scaled to the nether - takes off by itself (nose up, hop, deploy, rocket - no ledge needed), then hands the goal to Baritone's elytra process through the API (nothing is printed). The black screen shows only an ETA in minutes. While gliding on this leg the screen is painted over with no peek and no exception; if you need to see, `,stop` - you land, you see, the run is void.
+1. In the nether, press the run key. Stopping the flight anywhere but the point (`,stop`, an emergency landing, no rockets) voids the run; the next press draws a new point. The mod picks a random point - uniform over the round's ring (overworld blocks from spawn), scaled to the nether - takes off by itself (nose up, hop, deploy, rocket - no ledge needed), then hands the goal to Baritone's elytra process through the API (nothing is printed). The black screen shows only an ETA in minutes. While gliding on this leg the screen is painted over with no peek and no exception; if you need to see, `,stop` - you land, you see, the run is void.
 2. Within `arrive-radius` of the point you land; the mod says to build a portal and go through.
 3. Coming out in the overworld, the mod checks you are within `exit-tolerance` of the point; farther, and the run is void.
 4. In the nether after landing (and before takeoff) you see a 7x7x7 bubble around yourself - enough to build a portal or place a bed, nothing to recognise on video. Out of the portal, no block is drawn at all - sky, fluids and mobs only - until a dungeon spawner (one standing on cobblestone) is in range; then the run's dungeon is the ONLY thing drawn (x-ray style). You walk there, dig down, put your blocks back. A tracer line and box mark the run's dungeon. Block entities outside it aren't drawn. Beds, nether portals, obsidian and torches are always drawn. Every block you break during a run gets a ghost outline until the same block is back, and the HUD counts what's left to put back (positions live in memory only). F3 is dead for the whole run.
@@ -28,6 +28,16 @@ With `require-blind-run` on (the default), the stash key only works at a dungeon
 7. After the stash nothing is drawn again and everything stays locked until you are `return-distance` blocks away or in another dimension (pearl home, or die). Only then is the hash posted - a coin is never live on the site while the hider is still standing at the chest.
 
 The point, the spawner's position and your position never leave memory. Any dimension change other than the expected nether-to-overworld voids the run.
+
+## The ring (0.6)
+Every round publishes its ring on the site before it opens (`GET /api/board?round=N` → `ring_min`, `ring_max`), and the site refuses to change it once the round is open.
+For a real round the mod reads that ring when the run key is pressed and draws its point inside it. It never uses local numbers for a real round:
+
+- no answer from the site, or no sane ring in it: the run does not start;
+- the round is already open: the run does not start, and the stash key refuses too, so no book is ever left in a chest without a coin behind it;
+- `test-distance` is refused for a real round.
+
+`min-ow-radius` and `max-ow-radius` only apply to round 0, the test round. The ring that was used is written to the audit log (`run started (ring 15000-50000 from the site)`); a ring is public, a point never is.
 
 ## Tamper handling
 The mod cannot stop the person running it from removing it - nothing on your own computer can. What it does is make every deviation

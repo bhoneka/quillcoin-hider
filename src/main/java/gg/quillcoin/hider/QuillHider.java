@@ -108,7 +108,7 @@ public class QuillHider extends Module {
     private final Setting<String> author = sgGeneral.add(new StringSetting.Builder()
         .name("author").description("The official account. The module refuses to hide unless you are logged in as it.").defaultValue("QuillCoin").build());
     private final Setting<Integer> round = sgGeneral.add(new IntSetting.Builder()
-        .name("round").description("Round number written into the book title (R1 Coin 37). Use 0 for tests - the site ignores round 0.").defaultValue(1).min(0).sliderMax(50).build());
+        .name("round").description("Round number written into the book title (R1 Coin 37). Use 0 for tests: round 0 is the site's test round. A real round takes its ring from the site and cannot be added to once it is open.").defaultValue(1).min(0).sliderMax(50).build());
     private final Setting<Integer> numbersPerRound = sgGeneral.add(new IntSetting.Builder()
         .name("numbers-per-round").description("Coin numbers are drawn at random from 1..this, so the number never reveals the hiding order.").defaultValue(1000).min(10).sliderMax(100000).build());
     private final Setting<String> siteUrl = sgGeneral.add(new StringSetting.Builder()
@@ -131,11 +131,11 @@ public class QuillHider extends Module {
     private final Setting<Keybind> runKey = sgRun.add(new KeybindSetting.Builder()
         .name("run-key").description("In the nether: pick a random point you will never be shown and fly there with Baritone. Press again to resume a stalled run.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_O)).build());
     private final Setting<Integer> minRadius = sgRun.add(new IntSetting.Builder()
-        .name("min-ow-radius").description("Closest the random point may be to 0,0 - in OVERWORLD blocks.").defaultValue(15000).min(0).sliderMax(1000000).build());
+        .name("min-ow-radius").description("ROUND 0 ONLY (a real round uses the ring the site publishes). Closest the random point may be to 0,0 - in OVERWORLD blocks.").defaultValue(15000).min(0).sliderMax(1000000).build());
     private final Setting<Integer> maxRadius = sgRun.add(new IntSetting.Builder()
-        .name("max-ow-radius").description("Farthest the random point may be from 0,0 - in OVERWORLD blocks (nether flight is an eighth of it).").defaultValue(100000).min(1000).sliderMax(5000000).build());
+        .name("max-ow-radius").description("ROUND 0 ONLY (a real round uses the ring the site publishes). Farthest the random point may be from 0,0 - in OVERWORLD blocks (nether flight is an eighth of it).").defaultValue(50000).min(1000).sliderMax(5000000).build());
     private final Setting<Integer> testRadius = sgRun.add(new IntSetting.Builder()
-        .name("test-distance").description("TESTING ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
+        .name("test-distance").description("TESTING ONLY, ROUND 0 ONLY: 0 = off. Otherwise the point is drawn this many NETHER blocks (give or take 20%) from where you stand instead of the spawn-centred ring. Logged in the audit as a test run.").defaultValue(0).min(0).sliderMax(5000).build());
     private final Setting<Keybind> devSkipKey = sgRun.add(new KeybindSetting.Builder()
         .name("dev-skip-key").description("Singleplayer test worlds only: teleports you to the run's point in the nether with command feedback muted, so the coordinates never appear in chat. Logged as a dev skip.").defaultValue(Keybind.fromKey(GLFW.GLFW_KEY_J)).build());
     private final Setting<Integer> arriveRadius = sgRun.add(new IntSetting.Builder()
@@ -405,6 +405,10 @@ public class QuillHider extends Module {
 
         int number = drawNumber();
         if (number == -1) { fail("Every number in this round is used - raise numbers-per-round."); return; }
+        if (effectiveRound() >= 1) {
+            if (lastBoard == null) { fail("Couldn't reach the site - a real book is never hidden without it. Press the key again."); return; }
+            if (roundIsOpen(lastBoard, System.currentTimeMillis())) { audit("stash refused: round " + effectiveRound() + " is already open"); fail("Round %d is already open - nothing can be added to it.", effectiveRound()); return; }
+        }
         String code = makeCode();
         String title = "R" + effectiveRound() + " Coin " + number;
         pendingHash = sha256(code);
@@ -614,15 +618,50 @@ public class QuillHider extends Module {
             return;
         }
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
-        // uniform over the ring between min and max overworld radius, then scaled to the nether
+        if (ringLoading) { info("Still asking the site for the round's ring."); return; }
+        final int r = effectiveRound();
+        final boolean test = testRadius.get() > 0;
+        if (r >= 1) {
+            // a real round never runs on local numbers: its ring is the one the site publishes, and the round must not be open yet
+            if (test) { fail("test-distance is for round 0 only. Set it to 0 to hide a real book."); return; }
+            ringLoading = true;
+            feed("asking the site for round " + r + "'s ring");
+            new Thread(() -> {
+                final String board = boardJson(r);
+                mc.execute(() -> {
+                    ringLoading = false;
+                    int[] ring = board == null ? null : parseRing(board);
+                    if (ring == null) {
+                        audit("run refused: round " + r + "'s ring could not be read from the site");
+                        fail("Couldn't read round %d's ring from the site. A real round never runs on local numbers - check the connection and press again.", r);
+                        return;
+                    }
+                    if (roundIsOpen(board, System.currentTimeMillis())) {
+                        audit("run refused: round " + r + " is already open");
+                        fail("Round %d is already open - nothing can be added to it.", r);
+                        return;
+                    }
+                    beginRun(ring[0], ring[1], false, "ring " + ring[0] + "-" + ring[1] + " from the site");
+                });
+            }, "quillcoin-ring").start();
+            return;
+        }
+        double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
+        beginRun(lo, hi, test, test ? "TEST: point near the player" : "ring " + (int) lo + "-" + (int) hi + " from the settings");
+    }
+
+    private volatile boolean ringLoading;
+
+    /** Draws the point, uniform over the ring between lo and hi (overworld blocks, scaled to the nether), and hands it to Baritone. */
+    private void beginRun(double lo, double hi, boolean test, String how) {
+        if (mc.world == null || mc.player == null || mc.world.getRegistryKey() != World.NETHER) { fail("Blind runs start in the nether."); return; }
+        if (run != RunStage.NONE) return;
         double a = RNG.nextDouble() * Math.PI * 2;
-        boolean test = testRadius.get() > 0;
         if (test) {
             double r = testRadius.get() * (0.8 + RNG.nextDouble() * 0.4);
             targetNX = (int) Math.round(mc.player.getX() + r * Math.cos(a));
             targetNZ = (int) Math.round(mc.player.getZ() + r * Math.sin(a));
         } else {
-            double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
             double r = Math.sqrt(lo * lo + RNG.nextDouble() * (hi * hi - lo * lo));
             targetNX = (int) Math.round(r * Math.cos(a) / 8.0);
             targetNZ = (int) Math.round(r * Math.sin(a) / 8.0);
@@ -632,7 +671,7 @@ public class QuillHider extends Module {
         takeoff = Takeoff.NONE;
         takeoffTries = 0;
         run = RunStage.FLYING;
-        audit(test ? "run started (TEST: point near the player)" : "run started");
+        audit("run started (" + how + ")");
         try {
             if (savedAutoJump == null) savedAutoJump = BaritoneAPI.getSettings().elytraAutoJump.value;
             BaritoneAPI.getSettings().elytraAutoJump.value = false;
@@ -1046,18 +1085,43 @@ public class QuillHider extends Module {
                 if (p.length >= 2 && Integer.parseInt(p[0].trim()) == effectiveRound()) used.add(Integer.parseInt(p[1].trim()));
             }
         } catch (Exception ignored) { }
+        lastBoard = boardJson(effectiveRound());
+        if (lastBoard != null) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"number\":(\\d+)").matcher(lastBoard);
+            while (m.find()) used.add(Integer.parseInt(m.group(1)));
+        }                                                                            // offline: the local file still rules (round 0 only)
+        return used;
+    }
+
+    private String lastBoard;
+
+    /** The site's public board for one round, as text, or null when it cannot be reached. */
+    private String boardJson(int round) {
         try {
             String url = siteUrl.get().trim();
+            if (url.isEmpty()) return null;
             if (url.replaceAll("/+$", "").endsWith("quillcoin.gg")) url = API_BASE;
-            if (!url.isEmpty()) {
-                HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/board?round=" + effectiveRound())).timeout(Duration.ofSeconds(8)).GET().build(), HttpResponse.BodyHandlers.ofString());
-                if (resp.statusCode() == 200) {
-                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"number\":(\\d+)").matcher(resp.body());
-                    while (m.find()) used.add(Integer.parseInt(m.group(1)));
-                }
-            }
-        } catch (Exception ignored) { }                                              // offline: the local file still rules
-        return used;
+            HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/board?round=" + round)).timeout(Duration.ofSeconds(8)).GET().build(), HttpResponse.BodyHandlers.ofString());
+            return resp.statusCode() == 200 ? resp.body() : null;
+        } catch (Exception e) { return null; }
+    }
+
+    /** The ring a round publishes: {closest, farthest} in overworld blocks from spawn, or null when the board does not carry a sane one. */
+    static int[] parseRing(String board) {
+        java.util.regex.Matcher a = java.util.regex.Pattern.compile("\"ring_min\"\\s*:\\s*(\\d{1,8})\\b").matcher(board);
+        java.util.regex.Matcher b = java.util.regex.Pattern.compile("\"ring_max\"\\s*:\\s*(\\d{1,8})\\b").matcher(board);
+        if (!a.find() || !b.find()) return null;
+        int lo = Integer.parseInt(a.group(1)), hi = Integer.parseInt(b.group(1));
+        return hi > lo && hi <= 29_000_000 ? new int[]{lo, hi} : null;
+    }
+
+    /** True once the round's opening time has passed. An opening time that cannot be read counts as open: when in doubt, nothing is added. */
+    static boolean roundIsOpen(String board, long nowMs) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"opened_at\"\\s*:\\s*(null|\"([^\"]*)\")").matcher(board);
+        if (!m.find()) return true;
+        if (m.group(2) == null) return false;                                        // "opened_at": null
+        try { return java.time.OffsetDateTime.parse(m.group(2)).toInstant().toEpochMilli() <= nowMs; }
+        catch (Exception e) { return true; }
     }
 
     /** Quote indexes already used this round (9th field of the hides file). */
