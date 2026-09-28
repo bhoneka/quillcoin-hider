@@ -16,6 +16,8 @@ import meteordevelopment.meteorclient.settings.StringSetting;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.hud.Hud;
+import meteordevelopment.meteorclient.systems.hud.HudElement;
+import meteordevelopment.meteorclient.systems.hud.elements.TextHud;
 import meteordevelopment.meteorclient.gui.WidgetScreen;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
@@ -124,6 +126,9 @@ public class QuillHider extends Module {
         .name("blind").description("Paint the screen over - no exceptions - while gliding on the nether leg of a run, and keep F3 off.").defaultValue(true).build());
     private final Setting<Boolean> feed = sgBlind.add(new BoolSetting.Builder()
         .name("debug-feed").description("Show the last few things the mod did, bottom right, even over the dark screen. Never a coordinate.").defaultValue(true).build());
+
+    private final Setting<Boolean> hidePosition = sgBlind.add(new BoolSetting.Builder()
+        .name("hide-position").description("On a server, for as long as this module is on, nothing in this instance shows where you are: F3 stays shut, Meteor HUD texts that print a position or a biome are switched off, and so are Waypoints, Logout Spots and Stash Finder. Travel with another instance; hide with this one.").defaultValue(true).build());
 
     private final SettingGroup sgRun = settings.createGroup("Blind run");
     private final Setting<Boolean> requireRun = sgRun.add(new BoolSetting.Builder()
@@ -314,6 +319,8 @@ public class QuillHider extends Module {
         if (run == RunStage.RETURNING) audit("module switched off before leaving the chest - hash posts on next resync");
         restoreView();
         restoreAutoJump();
+        restoreDebugInfo();
+        toldAbout.clear();
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE;
         spawner = null;
@@ -329,6 +336,47 @@ public class QuillHider extends Module {
         lastDim = mc.world == null ? null : mc.world.getRegistryKey();
         warnedMaps = false;
         new Thread(this::resync, "quillcoin-resync").start();
+    }
+
+    // ------------------------------------------------------------------ never a position on screen
+
+    private static final String[] POSITION_MODULES = {"waypoints", "logout-spots", "stash-finder"};
+    private final Set<String> toldAbout = new HashSet<>();
+    private Boolean savedReducedDebug;
+
+    private boolean hidingPosition() { return hidePosition.get() && mc.player != null && !mc.isInSingleplayer(); }
+
+    /** True for a HUD text that prints where the player is, where the camera is, what is being looked at, or the biome. */
+    static boolean showsPosition(String starscript) {
+        String t = starscript == null ? "" : starscript.toLowerCase();
+        return t.contains("pos") || t.contains("biome") || t.contains("coord");
+    }
+
+    /** Whatever could put a position on the screen, or into a recording, is switched off again every half second. */
+    private void hidePositionTick() {
+        if (!hidingPosition()) { restoreDebugInfo(); return; }
+        if (savedReducedDebug == null) savedReducedDebug = mc.options.getReducedDebugInfo().getValue();
+        if (!mc.options.getReducedDebugInfo().getValue()) mc.options.getReducedDebugInfo().setValue(true);   // if F3 ever did open, it would open without coordinates
+        if (tick % 10 != 0) return;
+        try {
+            for (HudElement e : Hud.get()) {
+                if (!e.isActive() || !(e instanceof TextHud text) || !showsPosition(text.text.get())) continue;
+                e.toggle();
+                if (toldAbout.add("hud")) { audit("a HUD text that shows a position was switched off"); info("A HUD text showed a position. It is off: this instance never shows where you are."); }
+            }
+            for (String name : POSITION_MODULES) {
+                Module m = Modules.get().get(name);
+                if (m == null || !m.isActive()) continue;
+                m.toggle();
+                if (toldAbout.add(name)) { audit(name + " was on - switched off, it shows positions"); info("%s shows positions. It is off: this instance never shows where you are.", m.title); }
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    private void restoreDebugInfo() {
+        if (savedReducedDebug == null) return;
+        mc.options.getReducedDebugInfo().setValue(savedReducedDebug);
+        savedReducedDebug = null;
     }
 
     private void shrinkView() {
@@ -367,7 +415,7 @@ public class QuillHider extends Module {
     @EventHandler
     private void onKey(KeyEvent event) {
         if (mc.player == null) return;
-        if (event.key == GLFW.GLFW_KEY_F3 && run != RunStage.NONE) { event.cancel(); return; }   // F3 is dead during a run, no flicker
+        if (event.key == GLFW.GLFW_KEY_F3 && (run != RunStage.NONE || hidingPosition())) { event.cancel(); return; }   // F3 is dead: not one frame of it
         if (event.action != KeyAction.Press) return;
         if (runKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); startOrResumeRun(); return; }
         if (devSkipKey.get().matches(true, event.key, event.modifiers)) { event.cancel(); devSkip(); return; }
@@ -457,7 +505,8 @@ public class QuillHider extends Module {
     private void onTick(TickEvent.Post event) {
         tick++;
         if (mc.player == null) return;
-        if (blind.get() && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
+        if ((blind.get() || hidingPosition()) && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
+        hidePositionTick();
         if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
         // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
         // while a run is live or the screen is covered, the HUD is simply off. It comes back when the run ends.

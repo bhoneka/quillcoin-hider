@@ -14,6 +14,7 @@ With a dungeon chest open and a book-and-quill in your hotbar, press the stash k
 ## What the hider never sees
 - The code: it lives in memory between signing and hashing and is never printed, logged or rendered.
 - Coin books: their tooltips are blanked and they cannot be opened while the module is on.
+- A position on the screen: with `hide-position` on (the default), on a server, for as long as the module is on: F3 does not open, Meteor HUD texts that print a position or a biome are switched off, and so are the Waypoints, Logout Spots and Stash Finder modules. The instance that hides is not the instance that travels.
 - Coordinates: nothing this module writes contains one. Blind flight paints the screen over while gliding on the run's nether leg - no peek key, no damage reveal - and keeps F3 off. Use an instance with **no map mods**; the module warns if Xaero is loaded.
 
 ## The blind run (0.2)
