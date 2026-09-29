@@ -68,6 +68,12 @@ Every run records itself. Nobody presses record, so nobody chooses what gets fil
 
 Build the recorder with `recorder/build.sh` and put it at `meteor-client/quillcoin-recorder`.
 
+## Leaving the chest
+After the stash the world stays hidden until the hider is gone. Gone means: pulled away (a pearl, a teleport - a jump of more than a hundred blocks between two ticks, wherever it ends), in another dimension, or `return-distance` blocks from the chest. The jump counts whatever its length, so the tool never tells the hider whether the place they came out at is near the chest or far from it.
+
+## No map of where the hider has been
+Baritone keeps a cache of every region it passes through, in files named after the region, and prints each one into the game log. With this module on, on a server, that cache is switched off (`chunkCaching`), and put back when the module is switched off.
+
 ## A flight that comes down early
 Baritone sometimes lands, or is knocked down, and goes on saying that it is flying. When the hider has stood on the ground for three seconds during the flight, the mod ends that flight itself and throws Baritone's state away: within 200 blocks of where the run started it takes off again, anywhere else the run is void and the run key draws a new point. (Baritone's flight pathfinder is a native library that ends the whole game when it meets something it does not expect; taking off again on top of a flight that was never ended is one way to get there.)
 

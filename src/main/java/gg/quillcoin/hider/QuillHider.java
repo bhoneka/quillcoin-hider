@@ -162,7 +162,7 @@ public class QuillHider extends Module {
     private final Setting<Integer> groundView = sgRun.add(new IntSetting.Builder()
         .name("ground-view-distance").description("Render distance (chunks) on the overworld ground phase. Blocks are not drawn anyway; this limits how far mobs, players, item frames and drops are drawn, since those can hint at a biome. Restored when the run ends.").defaultValue(2).min(2).sliderMax(8).build());
     private final Setting<Integer> returnDistance = sgRun.add(new IntSetting.Builder()
-        .name("return-distance").description("After the stash the screen stays dark and locked until you are this far (blocks) from the chest, or in another dimension. Only then is the hash posted.").defaultValue(3000).min(200).sliderMax(50000).build());
+        .name("return-distance").description("After the stash the screen stays dark and locked until you are pulled away (a pearl, a teleport: a jump of more than a hundred blocks, wherever it ends), in another dimension, or this far (blocks) from the chest on foot or by wing. Only then is the hash posted.").defaultValue(3000).min(200).sliderMax(50000).build());
     private final Setting<Integer> dungeonRadius = sgRun.add(new IntSetting.Builder()
         .name("dungeon-radius").description("You must be within this many blocks of the run's spawner to stash.").defaultValue(10).min(4).sliderMax(24).build());
 
@@ -306,6 +306,7 @@ public class QuillHider extends Module {
     }
 
     private double stashX, stashZ;                                    // where the book went - lives here until you are far away, then gone
+    private double lastX, lastZ;                                      // where the hider stood a tick ago, after the stash: to notice being pulled away
     private int pendingRound, pendingNum; private String pendingHashForPost; private long pendingTs; private boolean pendingBlind; private String pendingServer;
     private String pendingLoc, pendingLocForPost;
     private int pendingQuoteIdx = -1;   // the chest position, AES-256-GCM under a key only the code can derive - never the plain coordinates
@@ -352,6 +353,7 @@ public class QuillHider extends Module {
         restoreView();
         restoreAutoJump();
         restoreDebugInfo();
+        try { if (savedCaching != null) { BaritoneAPI.getSettings().chunkCaching.value = savedCaching; savedCaching = null; } } catch (Throwable ignored) { }
         toldAbout.clear();
         if (run != RunStage.NONE) audit("module switched off during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE;
@@ -391,6 +393,19 @@ public class QuillHider extends Module {
     }
 
     /** Whatever could put a position on the screen, or into a recording, is switched off again every half second. */
+    private Boolean savedCaching;
+
+    /** Baritone writes a map of every region it passes through, in files named after the region, and says so in the game log. While this module is on, on a server, it does neither. */
+    private void noMapTick() {
+        try {
+            boolean off = hidingPosition();
+            var caching = BaritoneAPI.getSettings().chunkCaching;
+            if (off && savedCaching == null) { savedCaching = caching.value; caching.value = false; audit("baritone's map of visited regions is off"); }
+            else if (off && caching.value) caching.value = false;
+            else if (!off && savedCaching != null) { caching.value = savedCaching; savedCaching = null; }
+        } catch (Throwable ignored) { }
+    }
+
     private void hidePositionTick() {
         if (!hidingPosition()) { restoreDebugInfo(); return; }
         if (savedReducedDebug == null) savedReducedDebug = mc.options.getReducedDebugInfo().getValue();
@@ -629,6 +644,7 @@ public class QuillHider extends Module {
         if (mc.player == null) return;
         if ((blind.get() || hidingPosition()) && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
         hidePositionTick();
+        noMapTick();
         if (run != RunStage.NONE && !blind.get()) { audit("blind flight turned off during a run - run void"); run = RunStage.NONE; spawner = null; warn("Blind flight was turned off - the run is void."); }
         // Meteor's HUD draws after everything else and any element (Position, Waypoints...) can be added in two clicks:
         // while a run is live or the screen is covered, the HUD is simply off. It comes back when the run ends.
@@ -826,7 +842,7 @@ public class QuillHider extends Module {
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: taking off"
                 : run == RunStage.ARRIVED ? "blind run: build a portal here and go through"
                 : run == RunStage.OVERWORLD ? "blind run: walk until a dungeon appears"
-                : run == RunStage.RETURNING ? "stashed - put your blocks back, then pearl or tp away; the hash posts when you're " + returnDistance.get() + " blocks from here" + fix
+                : run == RunStage.RETURNING ? "stashed - put your blocks back, then pearl or tp away; the hash posts when you're gone" + fix
                 : lingering ? "away from the chest - the run is over" : "";
             if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
@@ -1382,7 +1398,12 @@ public class QuillHider extends Module {
             case RETURNING -> {
                 setXray(dim == World.OVERWORLD ? Xray.NOTHING : Xray.BUBBLE, null); // the world stays hidden until you're gone
                 double d = Math.hypot(mc.player.getX() - stashX, mc.player.getZ() - stashZ);
-                if (d > returnDistance.get()) finishReturn("far from the chest");
+                // Being pulled away shows as a jump: nobody moves a hundred blocks between two ticks. It counts wherever it ends,
+                // so the tool never tells the hider whether the place they came out at is near the chest or far from it
+                double jump = Math.hypot(mc.player.getX() - lastX, mc.player.getZ() - lastZ);
+                lastX = mc.player.getX(); lastZ = mc.player.getZ();
+                if (jump > 100) finishReturn("pulled away");
+                else if (d > returnDistance.get()) finishReturn("far from the chest");
             }
             default -> { if (xray != Xray.OFF) setXray(Xray.OFF, null); }
         }
@@ -1764,13 +1785,14 @@ public class QuillHider extends Module {
         if (recording() && recReady) { recRound = effectiveRound(); recNumber = pendingNumber; recStashMs = System.currentTimeMillis() - recReadyMs; }
         String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName() + "," + (pendingLoc == null ? "" : pendingLoc) + "," + (pendingQuoteIdx < 0 ? "" : pendingQuoteIdx);
         stashX = mc.player.getX(); stashZ = mc.player.getZ();
+        lastX = stashX; lastZ = stashZ;
         spawner = null;
         revealed = false;
         run = RunStage.RETURNING;                                                 // dark and locked until you're gone
         try {
             Files.writeString(hidesFile().toPath(), line + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception e) { fail("Couldn't write quillcoin-hides.txt: %s", e.getMessage()); }
-        say("%s hidden%s. Now pearl or tp away - the screen stays dark and the hash posts once you're %d blocks from here.", pendingTitle, blindRun ? " at the end of a blind run" : "", returnDistance.get());
+        say("%s hidden%s. Now pearl or tp away - the screen stays dark and the hash posts once you're gone.", pendingTitle, blindRun ? " at the end of a blind run" : "");
         pendingRound = effectiveRound(); pendingNum = pendingNumber; pendingHashForPost = pendingHash; pendingTs = now; pendingBlind = blindRun; pendingServer = serverName(); pendingLocForPost = pendingLoc; pendingLoc = null;
         pendingHash = null;
     }
