@@ -36,6 +36,7 @@ For a real round the mod reads that ring when the run key is pressed and draws i
 
 - no answer from the site, or no sane ring in it: the run does not start;
 - the round is already open: the run does not start, and the stash key refuses too, so no book is ever left in a chest without a coin behind it;
+- the round already holds all of its books (`planned` on the same board, counting books hidden here whose fingerprint has not reached the site yet): the run does not start, and the stash key refuses too. The site's database refuses a book too many as well;
 - `test-distance` is refused for a real round.
 
 **Overworld ring, nether flight.** A ring is given in overworld blocks. The point is drawn from it evenly by area and then divided by eight: a ring of 15,000 to 50,000 is a flight to somewhere 1,875 to 6,250 blocks from the nether's 0,0.
@@ -44,7 +45,7 @@ For a real round the mod reads that ring when the run key is pressed and draws i
 
 **Never a short flight.** The point is at least `min-flight` nether blocks (1,000 by default) from where the run starts. The black screen shows how long the flight takes; a flight of a few seconds would tell the hider that the book is next door.
 
-`min-ow-radius` and `max-ow-radius` only apply to round 0, the test round. The ring that was used is written to the audit log (`run started (ring 15000-50000 from the site)`); a ring is public, a point never is.
+`min-ow-radius` and `max-ow-radius` only apply to round 0, which is for trying things in singleplayer. On a server, round 0 is refused once the site has closed its test round: a book hidden under it would belong to no round at all. The ring that was used is written to the audit log (`run started (ring 15000-50000 from the site)`); a ring is public, a point never is.
 
 ## Tamper handling
 The mod cannot stop the person running it from removing it - nothing on your own computer can. What it does is make every deviation

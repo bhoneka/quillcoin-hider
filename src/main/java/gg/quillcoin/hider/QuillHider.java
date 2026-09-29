@@ -113,7 +113,7 @@ public class QuillHider extends Module {
     private final Setting<String> author = sgGeneral.add(new StringSetting.Builder()
         .name("author").description("The official account. The module refuses to hide unless you are logged in as it.").defaultValue("QuillCoin").build());
     private final Setting<Integer> round = sgGeneral.add(new IntSetting.Builder()
-        .name("round").description("Round number written into the book title (R1 Coin 37). Use 0 for tests: round 0 is the site's test round. A real round takes its ring from the site and cannot be added to once it is open.").defaultValue(1).min(0).sliderMax(50).build());
+        .name("round").description("Round number written into the book title (R1 Coin 37). A round takes its ring and its number of books from the site, and cannot be added to once it is full or open. 0 is for trying things in singleplayer.").defaultValue(1).min(0).sliderMax(50).build());
     private final Setting<Integer> numbersPerRound = sgGeneral.add(new IntSetting.Builder()
         .name("numbers-per-round").description("Coin numbers are drawn at random from 1..this, so the number never reveals the hiding order.").defaultValue(1000).min(10).sliderMax(100000).build());
     private final Setting<String> siteUrl = sgGeneral.add(new StringSetting.Builder()
@@ -461,6 +461,7 @@ public class QuillHider extends Module {
         if (effectiveRound() >= 1) {
             if (lastBoard == null) { fail("Couldn't reach the site - a real book is never hidden without it. Press the key again."); return; }
             if (roundIsOpen(lastBoard, System.currentTimeMillis())) { audit("stash refused: round " + effectiveRound() + " is already open"); fail("Round %d is already open - nothing can be added to it.", effectiveRound()); return; }
+            if (roundIsFull(lastBoard, waitingHere(effectiveRound()))) { audit("stash refused: round " + effectiveRound() + " already holds all of its books"); fail("Round %d already holds all %d of its books - nothing is hidden here.", effectiveRound(), parseSize(lastBoard)[0]); return; }
             int[] ring = parseRing(lastBoard);
             if (ring == null || !inRing(mc.player.getX(), mc.player.getZ(), ring[0], ring[1])) {
                 audit("stash refused: this chest is outside round " + effectiveRound() + "'s ring - run void");
@@ -468,6 +469,10 @@ public class QuillHider extends Module {
                 fail("This chest is outside round %d's ring - nothing is hidden here, and the run is void. Start another.", effectiveRound());
                 return;
             }
+        } else if (!mc.isInSingleplayer() && lastBoard == null && lastBoardStatus == 404) {
+            audit("stash refused: the site has no test round any more");
+            fail("The test round is closed. Set round to 1 (or the round being hidden) to hide a real book.");
+            return;
         }
         String code = makeCode();
         String title = "R" + effectiveRound() + " Coin " + number;
@@ -826,13 +831,38 @@ public class QuillHider extends Module {
                         fail("Round %d is already open - nothing can be added to it.", r);
                         return;
                     }
+                    if (roundIsFull(board, waitingHere(r))) {
+                        audit("run refused: round " + r + " already holds all of its books");
+                        fail("Round %d already holds all %d of its books - there is nothing left to hide.", r, parseSize(board)[0]);
+                        return;
+                    }
+                    int[] size = parseSize(board);
+                    if (size[0] > 0) say("Round %d: book %d of %d.", r, size[1] + waitingHere(r) + 1, size[0]);
                     beginRun(ring[0], ring[1], false, "ring " + ring[0] + "-" + ring[1] + " from the site");
                 });
             }, "quillcoin-ring").start();
             return;
         }
-        double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
-        beginRun(lo, hi, test, test ? "TEST: point near the player" : "ring " + (int) lo + "-" + (int) hi + " from the settings");
+        final double lo = minRadius.get(), hi = Math.max(minRadius.get() + 1000, maxRadius.get());
+        final String how = test ? "TEST: point near the player" : "ring " + (int) lo + "-" + (int) hi + " from the settings";
+        if (!mc.isInSingleplayer()) {
+            // round 0 on a server is the public test. Once the site has closed it, a book hidden under it would belong to no round at all
+            ringLoading = true;
+            new Thread(() -> {
+                boardJson(0);
+                mc.execute(() -> {
+                    ringLoading = false;
+                    if (lastBoardStatus == 404) {
+                        audit("run refused: the site has no test round any more");
+                        fail("The test round is closed. Set round to 1 (or the round being hidden) to hide a real book.");
+                        return;
+                    }
+                    beginRun(lo, hi, test, how);
+                });
+            }, "quillcoin-ring").start();
+            return;
+        }
+        beginRun(lo, hi, test, how);
     }
 
     private volatile boolean ringLoading;
@@ -1310,16 +1340,45 @@ public class QuillHider extends Module {
     }
 
     private String lastBoard;
+    /** What the site answered the last time a round was asked for: 200, 404 when it has no such round, 0 when it could not be reached. */
+    private volatile int lastBoardStatus;
 
     /** The site's public board for one round, as text, or null when it cannot be reached. */
     private String boardJson(int round) {
         try {
             String url = siteUrl.get().trim();
-            if (url.isEmpty()) return null;
+            if (url.isEmpty()) { lastBoardStatus = 0; return null; }
             if (url.replaceAll("/+$", "").endsWith("quillcoin.gg")) url = API_BASE;
             HttpResponse<String> resp = HTTP.send(HttpRequest.newBuilder(URI.create(url.replaceAll("/+$", "") + "/api/board?round=" + round)).timeout(Duration.ofSeconds(8)).GET().build(), HttpResponse.BodyHandlers.ofString());
+            lastBoardStatus = resp.statusCode();
             return resp.statusCode() == 200 ? resp.body() : null;
-        } catch (Exception e) { return null; }
+        } catch (Exception e) { lastBoardStatus = 0; return null; }
+    }
+
+    /** How many books a round holds and how many of them are on the board: {planned, hidden}. planned is -1 when the round publishes no size. */
+    static int[] parseSize(String board) {
+        java.util.regex.Matcher p = java.util.regex.Pattern.compile("\"planned\"\\s*:\\s*(null|\\d{1,6})\\b").matcher(board);
+        java.util.regex.Matcher h = java.util.regex.Pattern.compile("\"hidden\"\\s*:\\s*(\\d{1,6})\\b").matcher(board);
+        int planned = p.find() && !"null".equals(p.group(1)) ? Integer.parseInt(p.group(1)) : -1;
+        return new int[]{planned, h.find() ? Integer.parseInt(h.group(1)) : 0};
+    }
+
+    /** True when the round has no room for another book, counting the ones hidden here whose fingerprint has not reached the site yet. */
+    static boolean roundIsFull(String board, int waitingHere) {
+        int[] s = parseSize(board);
+        return s[0] > 0 && s[1] + Math.max(0, waitingHere) >= s[0];
+    }
+
+    /** Books of this round that were hidden from this computer and are not on the site yet. */
+    private int waitingHere(int round) {
+        int n = 0;
+        try {
+            if (hidesFile().exists()) for (String line : Files.readAllLines(hidesFile().toPath())) {
+                String[] p = line.split(",");
+                if (p.length >= 5 && Integer.parseInt(p[0].trim()) == round && p[4].trim().equals("0")) n++;
+            }
+        } catch (Exception ignored) { }
+        return n;
     }
 
     /** The ring a round publishes: {closest, farthest} in overworld blocks from spawn, or null when the board does not carry a sane one. */
