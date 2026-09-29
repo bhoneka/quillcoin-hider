@@ -169,6 +169,8 @@ public class QuillHider extends Module {
         .name("record").description("Record every run by itself: the game's window and the game's own sound, from the moment the run starts until you are away from the chest. The world is hidden before the recording begins and stays hidden until it has ended. Needs the recorder program at meteor-client/quillcoin-recorder.").defaultValue(true).build());
     private final Setting<Boolean> requireRecording = sgRecord.add(new BoolSetting.Builder()
         .name("require-recording").description("A run of a real round does not start without the recorder, and is void when the recording fails.").defaultValue(true).build());
+    private final Setting<Integer> afterLeaving = sgRecord.add(new IntSetting.Builder()
+        .name("seconds-after-leaving").description("How long the recording goes on after you are away from the chest, with the world shown again, so that whoever watches sees you really left. Whatever is around the place you come out at is in the recording. 0 = the recording ends before anything of that place is shown.").defaultValue(5).min(0).sliderMax(15).build());
     private final Setting<Boolean> publishRecordings = sgRecord.add(new BoolSetting.Builder()
         .name("publish").description("When a book of a real round is hidden, hand its recording to meteor-client/quillcoin-publish, which puts it on the site. It is called with two arguments: the recording and its notes.").defaultValue(true).build());
 
@@ -200,7 +202,7 @@ public class QuillHider extends Module {
     }
 
     private void setXray(Xray m, BlockPos center) {
-        if (m == Xray.OFF && recording()) {                                          // the world comes back only after the recording has ended
+        if (m == Xray.OFF && recording() && !lingering) {                            // the world comes back only after the recording has ended
             stopRecording();
             if (!revealWaiting) revealSince = System.currentTimeMillis();
             revealWaiting = true; filing = true;
@@ -248,8 +250,9 @@ public class QuillHider extends Module {
         else if (run != RunStage.NONE) audit("logged out during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE; spawner = null; skipUntil = 0; takeoff = Takeoff.NONE;
         broken.clear(); aimed.clear();
-        recStartTick = -1; revealWaiting = false;
+        recStartTick = -1; revealWaiting = false; lingering = false;
         if (recording()) { stopRecording(); filing = true; revealSince = System.currentTimeMillis(); }
+        if (savedPause != null) { mc.options.pauseOnLostFocus = savedPause; savedPause = null; }
         xray = Xray.OFF; xrayCenter = null; bubbleCenter = null;
         savedView = -1;                                                              // options were restored by the game closing the world; don't double-restore
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
@@ -629,7 +632,11 @@ public class QuillHider extends Module {
         boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED || run == RunStage.RETURNING;
         if (onGroundPhase && savedView == -1) shrinkView();
         else if (!onGroundPhase && savedView != -1) restoreView();
-        boolean wantHudOff = run != RunStage.NONE || revealWaiting;
+        boolean wantHudOff = run != RunStage.NONE || revealWaiting || recording();   // nothing of Meteor's HUD is ever in a recording
+        // the hider clicks over to another window to be pearled away: the game must not cover the last seconds with its menu
+        boolean noPause = run != RunStage.NONE || recording();
+        if (noPause && savedPause == null) { savedPause = mc.options.pauseOnLostFocus; mc.options.pauseOnLostFocus = false; }
+        else if (!noPause && savedPause != null) { mc.options.pauseOnLostFocus = savedPause; savedPause = null; }
         Hud hud = Hud.get();
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
@@ -767,7 +774,7 @@ public class QuillHider extends Module {
     /** Runs before anything else draws a frame: while a run is live the HUD is off for THIS frame, whatever key was just pressed. */
     @EventHandler(priority = EventPriority.HIGHEST + 1000)
     private void onRender2DFirst(Render2DEvent event) {
-        if ((run != RunStage.NONE || revealWaiting) && Hud.get().active) Hud.get().active = false;
+        if ((run != RunStage.NONE || revealWaiting || recording()) && Hud.get().active) Hud.get().active = false;
     }
 
     /**
@@ -810,7 +817,8 @@ public class QuillHider extends Module {
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: taking off"
                 : run == RunStage.ARRIVED ? "blind run: build a portal here and go through"
                 : run == RunStage.OVERWORLD ? "blind run: walk until a dungeon appears"
-                : run == RunStage.RETURNING ? "stashed - put your blocks back, then pearl or tp away; the hash posts when you're " + returnDistance.get() + " blocks from here" + fix : "";
+                : run == RunStage.RETURNING ? "stashed - put your blocks back, then pearl or tp away; the hash posts when you're " + returnDistance.get() + " blocks from here" + fix
+                : lingering ? "away from the chest - the run is over" : "";
             if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
         if (recReady && recording() && !revealWaiting) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "\u25CF REC", sw / 2, 6, 0xFFFF5555);
@@ -838,8 +846,9 @@ public class QuillHider extends Module {
     private File recFile;                                              // what it writes
     private volatile boolean recReady;                                 // it said READY
     private volatile String recProblem;                                // or what went wrong
-    private boolean recNoted, recGaveUp, revealWaiting, filing;
-    private long recAskedMs, recReadyMs, recStashMs = -1, recEndMs = -1, revealSince, recStartTick = -1, lastSelfTest;
+    private boolean recNoted, recGaveUp, revealWaiting, filing, lingering;
+    private long recAskedMs, recReadyMs, recStashMs = -1, recEndMs = -1, recAwayMs = -1, revealSince, lingerUntil, recStartTick = -1, lastSelfTest;
+    private Boolean savedPause;                                        // the game's own "pause when the window loses focus", put back after the recording
     private int recRound = -1, recNumber = -1, recRoundAtStart;        // the book hidden during this recording, if one was
     private String recServer = "unknown";
 
@@ -849,9 +858,9 @@ public class QuillHider extends Module {
     private boolean recording() { Process p = recorder; return p != null && p.isAlive(); }
 
     private void startRecording() {
-        if (recording() || filing || revealWaiting) { recStartTick = tick + 5; return; }   // the last one is still being put away
+        if (recording() || filing || revealWaiting || lingering) { recStartTick = tick + 5; return; }   // the last one is still being put away
         recReady = false; recProblem = null; recNoted = false; recGaveUp = false;
-        recStashMs = recEndMs = -1; recRound = recNumber = -1; recRoundAtStart = effectiveRound(); recServer = serverName();
+        recStashMs = recEndMs = recAwayMs = -1; recRound = recNumber = -1; recRoundAtStart = effectiveRound(); recServer = serverName();
         try {
             File dir = recordingsFolder();
             dir.mkdirs();
@@ -911,6 +920,10 @@ public class QuillHider extends Module {
 
     /** Every client tick, in a world or not: once the recorder has ended, the world may be shown again and the file is put away. */
     private void filingTick() {
+        if (lingering && (System.currentTimeMillis() >= lingerUntil || !recording())) {
+            lingering = false;
+            stopRecording(); filing = true; revealSince = System.currentTimeMillis();
+        }
         if (!revealWaiting && !filing) return;
         Process p = recorder;
         if (p != null && p.isAlive()) {
@@ -923,7 +936,8 @@ public class QuillHider extends Module {
 
     /** The module is being switched off: the recording ends before anything else happens. */
     private void endRecordingNow() {
-        recStartTick = -1;
+        recStartTick = -1; lingering = false;
+        if (savedPause != null) { mc.options.pauseOnLostFocus = savedPause; savedPause = null; }
         Process p = recorder;
         if (p != null && p.isAlive()) {
             stopRecording();
@@ -946,6 +960,7 @@ public class QuillHider extends Module {
         String json = "{\n  \"round\": " + r + ",\n  \"number\": " + (hid ? String.valueOf(n) : "null") + ",\n  \"hidden\": " + hid
             + ",\n  \"server\": \"" + recServer.replaceAll("[^a-z0-9.:-]", "") + "\",\n  \"recorded\": \"" + java.time.Instant.ofEpochMilli(recReadyMs).toString() + "\""
             + ",\n  \"seconds_to_stash\": " + (recStashMs < 0 ? "null" : String.format(java.util.Locale.ROOT, "%.1f", recStashMs / 1000.0))
+            + ",\n  \"seconds_to_away\": " + (recAwayMs < 0 ? "null" : String.format(java.util.Locale.ROOT, "%.1f", recAwayMs / 1000.0))
             + ",\n  \"seconds_to_end\": " + (recEndMs < 0 ? "null" : String.format(java.util.Locale.ROOT, "%.1f", recEndMs / 1000.0)) + "\n}\n";
         try { Files.writeString(notes.toPath(), json, StandardCharsets.UTF_8); } catch (Exception e) { audit("the recording's notes could not be written"); }
         audit(hid ? "recording saved: R" + r + " Coin " + n : "recording saved: a run without a book");
@@ -1010,7 +1025,7 @@ public class QuillHider extends Module {
         }
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
         if (ringLoading) { info("Still asking the site for the round's ring."); return; }
-        if (revealWaiting || filing) { info("The last recording is still being saved. One moment."); return; }
+        if (revealWaiting || filing || lingering) { info("The last recording is still being saved. One moment."); return; }
         if (recordRuns.get() && !recorderProgram().canExecute()) {
             if (requireRecording.get() && effectiveRound() >= 1) {
                 audit("run refused: the recorder program is missing");
@@ -1334,6 +1349,11 @@ public class QuillHider extends Module {
     private void finishReturn(String how) {
         audit("away from the stash (" + how + ") - posting the hash");
         run = RunStage.NONE;
+        if (afterLeaving.get() > 0 && recording() && recReady) {                     // the recording goes on, and shows where the hider came out
+            lingering = true;
+            lingerUntil = System.currentTimeMillis() + afterLeaving.get() * 1000L;
+            recAwayMs = System.currentTimeMillis() - recReadyMs;
+        }
         setXray(Xray.OFF, null);
         broken.clear();
         spawner = null;
