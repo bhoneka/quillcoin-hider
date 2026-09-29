@@ -836,6 +836,7 @@ public class QuillHider extends Module {
     }
 
     private volatile boolean ringLoading;
+    private double runStartX, runStartZ;
     /** The ring this run has to end in, in overworld blocks from spawn. A ring is public; the point inside it never is. */
     private double ringLo = 0, ringHi = Double.MAX_VALUE;
 
@@ -878,6 +879,7 @@ public class QuillHider extends Module {
         elytraWasActive = false;
         takeoff = Takeoff.NONE;
         takeoffTries = 0;
+        runStartX = mc.player.getX(); runStartZ = mc.player.getZ();      // only to tell a failed takeoff from a flight that was cut short; never written anywhere
         run = RunStage.FLYING;
         audit("run started (" + how + ")");
         try {
@@ -912,7 +914,7 @@ public class QuillHider extends Module {
 
     private void takeoffTick() {
         if (takeoff == Takeoff.NONE) {
-            if (++takeoffTries > 4) { run = RunStage.NONE; audit("takeoff failed four times - run void"); warn("Couldn't take off - the run is void. Elytra on, rockets in the hotbar, some room around you."); return; }
+            if (++takeoffTries > 8) { run = RunStage.NONE; audit("takeoff failed eight times - run void"); warn("Couldn't take off - the run is void. Elytra on, rockets in the hotbar, some room around you."); return; }
             takeoff = Takeoff.JUMPING; takeoffSince = tick; jumpTapped = wasAirborne = boostFired = secondRocket = false;
             feed("taking off (" + takeoffTries + ")");
         }
@@ -1002,6 +1004,11 @@ public class QuillHider extends Module {
                     say("Arrived. Make a portal here and go through it - the run continues in the overworld.");
                 } else if (skipUntil != 0) {
                     return;                                                          // dev skip: wait for the teleport and the touchdown, nothing else
+                } else if (elytraWasActive && !active && Math.hypot(mc.player.getX() - runStartX, mc.player.getZ() - runStartZ) < 200) {
+                    // it stopped where it started (a setback, a bump on the way up): nothing was learned, so this is a failed takeoff, not an ended flight
+                    elytraWasActive = false;
+                    takeoff = Takeoff.NONE;
+                    audit("the flight stopped right after takeoff - taking off again");
                 } else if (elytraWasActive && !active) {
                     // ,stop, an emergency landing, out of rockets: the flight ended somewhere that isn't the point - void now, see now, land yourself
                     run = RunStage.NONE;
