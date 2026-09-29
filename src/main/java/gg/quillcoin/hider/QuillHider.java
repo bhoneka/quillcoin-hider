@@ -52,6 +52,7 @@ import net.minecraft.util.Hand;
 import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 import net.minecraft.world.chunk.WorldChunk;
 import java.util.Map;
+import net.minecraft.client.gui.screen.GameMenuScreen;
 import net.minecraft.client.gui.screen.ingame.BookScreen;
 import net.minecraft.client.gui.screen.ingame.BookEditScreen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
@@ -637,6 +638,9 @@ public class QuillHider extends Module {
         boolean noPause = run != RunStage.NONE || recording();
         if (noPause && savedPause == null) { savedPause = mc.options.pauseOnLostFocus; mc.options.pauseOnLostFocus = false; }
         else if (!noPause && savedPause != null) { mc.options.pauseOnLostFocus = savedPause; savedPause = null; }
+        // Escape still opens the game's menu and frees the mouse. Once the hider has clicked over to the other window, the menu
+        // of this one is closed again, so the recording shows the game and not a menu
+        if (recording() && mc.currentScreen instanceof GameMenuScreen && !mc.isWindowFocused()) mc.setScreen(null);
         Hud hud = Hud.get();
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
