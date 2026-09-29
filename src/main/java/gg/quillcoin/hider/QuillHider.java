@@ -170,6 +170,8 @@ public class QuillHider extends Module {
         .name("record").description("Record every run by itself: the game's window and the game's own sound, from the moment the run starts until you are away from the chest. The world is hidden before the recording begins and stays hidden until it has ended. Needs the recorder program at meteor-client/quillcoin-recorder.").defaultValue(true).build());
     private final Setting<Boolean> requireRecording = sgRecord.add(new BoolSetting.Builder()
         .name("require-recording").description("A run of a real round does not start without the recorder, and is void when the recording fails.").defaultValue(true).build());
+    private final Setting<Integer> beforeStart = sgRecord.add(new IntSetting.Builder()
+        .name("seconds-before-start").description("The recording begins when you press the run key, with the world still shown, and the run itself starts this many seconds later, so that whoever watches sees where it starts: in the nether. 0 = the recording begins once the world is hidden.").defaultValue(3).min(0).sliderMax(15).build());
     private final Setting<Integer> afterLeaving = sgRecord.add(new IntSetting.Builder()
         .name("seconds-after-leaving").description("How long the recording goes on after you are away from the chest, with the world shown again, so that whoever watches sees you really left. Whatever is around the place you come out at is in the recording. 0 = the recording ends before anything of that place is shown.").defaultValue(5).min(0).sliderMax(15).build());
     private final Setting<Boolean> publishRecordings = sgRecord.add(new BoolSetting.Builder()
@@ -251,7 +253,7 @@ public class QuillHider extends Module {
         else if (run != RunStage.NONE) audit("logged out during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE; spawner = null; skipUntil = 0; takeoff = Takeoff.NONE;
         broken.clear(); aimed.clear();
-        recStartTick = -1; revealWaiting = false; lingering = false;
+        recStartTick = -1; revealWaiting = false; lingering = false; armed = false;
         if (recording()) { stopRecording(); filing = true; revealSince = System.currentTimeMillis(); }
         if (savedPause != null) { mc.options.pauseOnLostFocus = savedPause; savedPause = null; }
         xray = Xray.OFF; xrayCenter = null; bubbleCenter = null;
@@ -646,6 +648,7 @@ public class QuillHider extends Module {
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
         else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
         if (feedbackRestoreTick != 0 && tick >= feedbackRestoreTick) { feedbackRestoreTick = 0; mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback true"); }
+        armedTick();
         runTick();
         recordingTick();
         bubbleTick();
@@ -759,10 +762,10 @@ public class QuillHider extends Module {
     @EventHandler
     private void onOpenScreen(OpenScreenEvent event) {
         if (mc.player == null) return;
-        if (event.screen instanceof WidgetScreen && run != RunStage.NONE) {
+        if (event.screen instanceof WidgetScreen && (run != RunStage.NONE || armed || recording())) {
             event.cancel();
             audit("meteor gui blocked during the run");
-            warn("Meteor's GUI is locked while a run is live.");
+            warn("Meteor's GUI is locked while a run is live or being recorded.");
             return;
         }
         if (event.screen instanceof BookEditScreen && (stage == Stage.PREPARE || stage == Stage.SIGNING)) { event.cancel(); return; }
@@ -817,7 +820,8 @@ public class QuillHider extends Module {
         } else {
             int miss = missingBlocks();
             String fix = miss > 0 ? "   |   " + miss + " block" + (miss > 1 ? "s" : "") + " to put back" : "";
-            String top = run == RunStage.DESIGNATED ? arrow() + fix
+            String top = armed ? "recording - the run starts in " + Math.max(1, beforeStart.get() - (recReady ? (int) ((System.currentTimeMillis() - recReadyMs) / 1000) : 0)) + " s"
+                : run == RunStage.DESIGNATED ? arrow() + fix
                 : run == RunStage.FLYING && !mc.player.isGliding() ? "blind run: taking off"
                 : run == RunStage.ARRIVED ? "blind run: build a portal here and go through"
                 : run == RunStage.OVERWORLD ? "blind run: walk until a dungeon appears"
@@ -899,8 +903,8 @@ public class QuillHider extends Module {
     private void recordingTick() {
         if (recStartTick >= 0 && tick >= recStartTick) { recStartTick = -1; if (run != RunStage.NONE) startRecording(); }
         Process p = recorder;
-        if (p == null || run == RunStage.NONE || recGaveUp) return;
-        if (recReady && !recNoted) { recNoted = true; audit("recording started"); feed("recording"); }
+        if (p == null || (run == RunStage.NONE && !armed) || recGaveUp) return;
+        if (recReady && !recNoted) { recNoted = true; audit(armed ? "recording started, " + beforeStart.get() + " s before the run" : "recording started"); feed("recording"); }
         String why = recProblem != null ? ("permission".equals(recProblem) ? "macOS has not allowed it yet" : recProblem)
             : !p.isAlive() ? "the recorder stopped by itself"
             : !recReady && System.currentTimeMillis() - recAskedMs > 8000 ? "the recorder did not start" : null;
@@ -910,11 +914,14 @@ public class QuillHider extends Module {
     private void recordingFailed(String why) {
         boolean must = requireRecording.get() && effectiveRound() >= 1, permission = "permission".equals(recProblem);
         recGaveUp = true;
-        audit("no recording: " + why + (must && run != RunStage.NONE ? " - run void" : ""));
+        final boolean live = run != RunStage.NONE || armed;
+        audit("no recording: " + why + (must && live ? " - run void" : ""));
         Process p = recorder;
         if (p != null) { if (p.isAlive()) p.destroy(); filing = true; revealSince = System.currentTimeMillis(); }
         if (permission) warn(PERMISSION_HELP); else warn("No recording: %s.", why);
-        if (must && run != RunStage.NONE) {
+        if (armed && !must) { armed = false; beginRun(armedLo, armedHi, armedTest, armedHow); }   // not a real round: the run goes on unrecorded
+        if (must && live) {
+            armed = false;
             run = RunStage.NONE; spawner = null; takeoff = Takeoff.NONE; elytraWasActive = false;
             mc.options.jumpKey.setPressed(false);
             try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
@@ -940,7 +947,7 @@ public class QuillHider extends Module {
 
     /** The module is being switched off: the recording ends before anything else happens. */
     private void endRecordingNow() {
-        recStartTick = -1; lingering = false;
+        recStartTick = -1; lingering = false; armed = false;
         if (savedPause != null) { mc.options.pauseOnLostFocus = savedPause; savedPause = null; }
         Process p = recorder;
         if (p != null && p.isAlive()) {
@@ -1023,6 +1030,7 @@ public class QuillHider extends Module {
         String me = mc.getSession() == null ? "" : mc.getSession().getUsername();
         if (!me.equals(author.get())) { fail("You are %s, not %s.", me, author.get()); return; }
         try { Class.forName("baritone.api.BaritoneAPI"); } catch (Throwable t) { fail("Baritone isn't installed."); return; }
+        if (armed) { info("Recording. The run starts in a moment."); return; }
         if (run == RunStage.FLYING) {
             info("A run is live. Land somewhere that isn't the point (,stop) to void it, or let it finish.");
             return;
@@ -1067,7 +1075,7 @@ public class QuillHider extends Module {
                     }
                     int[] size = parseSize(board);
                     if (size[0] > 0) say("Round %d: book %d of %d.", r, size[1] + waitingHere(r) + 1, size[0]);
-                    beginRun(ring[0], ring[1], false, "ring " + ring[0] + "-" + ring[1] + " from the site");
+                    armRun(ring[0], ring[1], false, "ring " + ring[0] + "-" + ring[1] + " from the site");
                 });
             }, "quillcoin-ring").start();
             return;
@@ -1086,12 +1094,41 @@ public class QuillHider extends Module {
                         fail("The test round is closed. Set round to 1 (or the round being hidden) to hide a real book.");
                         return;
                     }
-                    beginRun(lo, hi, test, how);
+                    armRun(lo, hi, test, how);
                 });
             }, "quillcoin-ring").start();
             return;
         }
-        beginRun(lo, hi, test, how);
+        armRun(lo, hi, test, how);
+    }
+
+    private boolean armed;                                             // the recording runs, the world is still shown, the run starts in a moment
+    private double armedLo, armedHi; private boolean armedTest; private String armedHow;
+
+    /** The recording begins first, with the world still shown, so whoever watches sees where the run starts. The run itself begins a few seconds later. */
+    private void armRun(double lo, double hi, boolean test, String how) {
+        if (beforeStart.get() <= 0 || !recordRuns.get() || !recorderProgram().canExecute()) { beginRun(lo, hi, test, how); return; }
+        if (mc.world == null || mc.player == null || mc.world.getRegistryKey() != World.NETHER) { fail("Blind runs start in the nether."); return; }
+        if (run != RunStage.NONE || armed) return;
+        armedLo = lo; armedHi = hi; armedTest = test; armedHow = how;
+        armed = true;
+        startRecording();
+        if (armed) say("Recording. The run starts in %d seconds.", beforeStart.get());
+    }
+
+    private void armedTick() {
+        if (!armed) return;
+        if (mc.world == null || mc.world.getRegistryKey() != World.NETHER) { armed = false; abandonRecording("left the nether before the run started"); return; }
+        if (!recReady || System.currentTimeMillis() - recReadyMs < beforeStart.get() * 1000L) return;
+        armed = false;
+        beginRun(armedLo, armedHi, armedTest, armedHow);
+        if (run == RunStage.NONE) abandonRecording("the run did not start");
+    }
+
+    /** A recording that was begun for a run that never started: ended and kept as a run without a book. */
+    private void abandonRecording(String why) {
+        audit("recording ended: " + why);
+        if (recording()) { stopRecording(); filing = true; revealSince = System.currentTimeMillis(); }
     }
 
     private volatile boolean ringLoading;
@@ -1141,7 +1178,7 @@ public class QuillHider extends Module {
         runStartX = mc.player.getX(); runStartZ = mc.player.getZ();      // only to tell a failed takeoff from a flight that was cut short; never written anywhere
         run = RunStage.FLYING;
         audit("run started (" + how + ")");
-        if (recordRuns.get() && recorderProgram().canExecute()) recStartTick = tick + 10;   // half a second: by then the world around the hider is no longer drawn
+        if (!recording() && recordRuns.get() && recorderProgram().canExecute()) recStartTick = tick + 10;   // half a second: by then the world around the hider is no longer drawn
         try {
             if (savedAutoJump == null) savedAutoJump = BaritoneAPI.getSettings().elytraAutoJump.value;
             BaritoneAPI.getSettings().elytraAutoJump.value = false;
@@ -1225,6 +1262,7 @@ public class QuillHider extends Module {
     }
 
     private long feedbackRestoreTick, skipUntil;
+    private int groundedTicks;
 
     /** Test worlds only: jump to the point without the flight. Feedback is muted so the tp message can't print the coordinates. */
     private void devSkip() {
@@ -1275,9 +1313,26 @@ public class QuillHider extends Module {
                     elytraWasActive = false;
                     audit("flight ended before the point - run void");
                     warn("The flight ended before the point - the run is void. Press %s for a new one.", runKey.get());
+                } else if (elytraWasActive && mc.player.isOnGround() && !mc.player.isGliding()) {
+                    // Baritone still says it is flying, and the hider is standing on the ground: after three seconds that flight is over.
+                    // Its state is thrown away here, on the ground, so that nothing stale is left when the hider is in the air again
+                    if (++groundedTicks >= 60) {
+                        groundedTicks = 0;
+                        elytraWasActive = false;
+                        try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
+                        if (Math.hypot(mc.player.getX() - runStartX, mc.player.getZ() - runStartZ) < 200) {
+                            takeoff = Takeoff.NONE;
+                            audit("the flight came down right after takeoff - taking off again");
+                        } else {
+                            run = RunStage.NONE;
+                            audit("the flight came down before the point - run void");
+                            warn("The flight came down before the point - the run is void. Press %s for a new one.", runKey.get());
+                        }
+                    }
                 } else if (!elytraWasActive && !(active && mc.player.isGliding())) {
                     takeoffTick();                                                       // we launch; Baritone steers once it's airborne
                 }
+                if (mc.player.isGliding() || !mc.player.isOnGround()) groundedTicks = 0;
                 if (active && mc.player.isGliding()) { elytraWasActive = true; if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; } }
             }
             case ARRIVED -> setXray(Xray.BUBBLE, null);
