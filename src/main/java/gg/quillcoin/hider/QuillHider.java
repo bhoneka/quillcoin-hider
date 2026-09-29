@@ -7,6 +7,7 @@ import meteordevelopment.meteorclient.events.meteor.KeyEvent;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
+import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.KeybindSetting;
@@ -68,7 +69,11 @@ import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.util.concurrent.TimeUnit;
 import java.net.URI;
 import net.minecraft.client.network.ServerInfo;
 import java.net.http.HttpClient;
@@ -159,6 +164,14 @@ public class QuillHider extends Module {
     private final Setting<Integer> dungeonRadius = sgRun.add(new IntSetting.Builder()
         .name("dungeon-radius").description("You must be within this many blocks of the run's spawner to stash.").defaultValue(10).min(4).sliderMax(24).build());
 
+    private final SettingGroup sgRecord = settings.createGroup("Recording");
+    private final Setting<Boolean> recordRuns = sgRecord.add(new BoolSetting.Builder()
+        .name("record").description("Record every run by itself: the game's window and the game's own sound, from the moment the run starts until you are away from the chest. The world is hidden before the recording begins and stays hidden until it has ended. Needs the recorder program at meteor-client/quillcoin-recorder.").defaultValue(true).build());
+    private final Setting<Boolean> requireRecording = sgRecord.add(new BoolSetting.Builder()
+        .name("require-recording").description("A run of a real round does not start without the recorder, and is void when the recording fails.").defaultValue(true).build());
+    private final Setting<Boolean> publishRecordings = sgRecord.add(new BoolSetting.Builder()
+        .name("publish").description("When a book of a real round is hidden, hand its recording to meteor-client/quillcoin-publish, which puts it on the site. It is called with two arguments: the recording and its notes.").defaultValue(true).build());
+
     /** NONE -> FLYING (nether, Baritone) -> ARRIVED (build a portal) -> OVERWORLD (fly, find a spawner) -> DESIGNATED (stash allowed here) */
     private enum RunStage { NONE, FLYING, ARRIVED, OVERWORLD, DESIGNATED, RETURNING }
     private static QuillHider INSTANCE;
@@ -187,6 +200,12 @@ public class QuillHider extends Module {
     }
 
     private void setXray(Xray m, BlockPos center) {
+        if (m == Xray.OFF && recording()) {                                          // the world comes back only after the recording has ended
+            stopRecording();
+            if (!revealWaiting) revealSince = System.currentTimeMillis();
+            revealWaiting = true; filing = true;
+            return;
+        }
         boolean changed = m != xray || (center == null ? xrayCenter != null : !center.equals(xrayCenter));
         xray = m; xrayCenter = center;
         if (changed && mc.worldRenderer != null) mc.worldRenderer.reload();
@@ -229,6 +248,8 @@ public class QuillHider extends Module {
         else if (run != RunStage.NONE) audit("logged out during a run (" + run.name().toLowerCase() + ") - run void");
         run = RunStage.NONE; spawner = null; skipUntil = 0; takeoff = Takeoff.NONE;
         broken.clear(); aimed.clear();
+        recStartTick = -1; revealWaiting = false;
+        if (recording()) { stopRecording(); filing = true; revealSince = System.currentTimeMillis(); }
         xray = Xray.OFF; xrayCenter = null; bubbleCenter = null;
         savedView = -1;                                                              // options were restored by the game closing the world; don't double-restore
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
@@ -256,11 +277,11 @@ public class QuillHider extends Module {
 
     private static final SettingColor BLACK = new SettingColor(0, 0, 0, 255);
 
-    private boolean covered() { return blind.get() && run == RunStage.FLYING && mc.player != null && mc.player.isGliding(); }
+    private boolean covered() { return revealWaiting || (blind.get() && run == RunStage.FLYING && mc.player != null && mc.player.isGliding()); }
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.player == null || run == RunStage.NONE) return;
+        if (mc.player == null || (run == RunStage.NONE && !revealWaiting)) return;
         if (covered()) {                                                              // the world pass ends here; chat, hotbar and labels are HUD and land on top
             Vec3d c = mc.gameRenderer.getCamera().getPos();
             event.renderer.box(c.x - 2, c.y - 2, c.z - 2, c.x + 2, c.y + 2, c.z + 2, BLACK, BLACK, ShapeMode.Sides, 0);
@@ -317,6 +338,7 @@ public class QuillHider extends Module {
     public void onDeactivate() {
         if (hudSuppressed) { Hud.get().active = hudWasActive; hudSuppressed = false; }
         if (takeoff != Takeoff.NONE) { mc.options.jumpKey.setPressed(false); takeoff = Takeoff.NONE; }
+        endRecordingNow();
         setXray(Xray.OFF, null);
         broken.clear(); aimed.clear();
         if (run == RunStage.RETURNING) audit("module switched off before leaving the chest - hash posts on next resync");
@@ -339,6 +361,12 @@ public class QuillHider extends Module {
         lastDim = mc.world == null ? null : mc.world.getRegistryKey();
         warnedMaps = false;
         new Thread(this::resync, "quillcoin-resync").start();
+        if (mc.world != null && recordRuns.get()) new Thread(this::recorderSelfTest, "quillcoin-recorder-test").start();
+    }
+
+    @EventHandler
+    private void onGameJoined(GameJoinedEvent event) {
+        if (recordRuns.get()) new Thread(this::recorderSelfTest, "quillcoin-recorder-test").start();
     }
 
     // ------------------------------------------------------------------ never a position on screen
@@ -406,7 +434,7 @@ public class QuillHider extends Module {
     private static File auditFile() { return new File(MeteorClient.FOLDER, "quillcoin-audit.txt"); }
 
     /** Integrity events, append-only, published with the round. Never a coordinate. */
-    private void audit(String event) {
+    private synchronized void audit(String event) {
         try {
             Files.writeString(auditFile().toPath(), (System.currentTimeMillis() / 1000) + "," + event + System.lineSeparator(), StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (Exception ignored) { }
@@ -590,6 +618,7 @@ public class QuillHider extends Module {
     @EventHandler
     private void onTick(TickEvent.Post event) {
         tick++;
+        filingTick();
         if (mc.player == null) return;
         if ((blind.get() || hidingPosition()) && mc.getDebugHud().shouldShowDebugHud()) mc.getDebugHud().toggleDebugHud();
         hidePositionTick();
@@ -600,13 +629,14 @@ public class QuillHider extends Module {
         boolean onGroundPhase = run == RunStage.OVERWORLD || run == RunStage.DESIGNATED || run == RunStage.RETURNING;
         if (onGroundPhase && savedView == -1) shrinkView();
         else if (!onGroundPhase && savedView != -1) restoreView();
-        boolean wantHudOff = run != RunStage.NONE;
+        boolean wantHudOff = run != RunStage.NONE || revealWaiting;
         Hud hud = Hud.get();
         if (wantHudOff && !hudSuppressed) { hudWasActive = hud.active; hud.active = false; hudSuppressed = true; }
         else if (!wantHudOff && hudSuppressed) { hud.active = hudWasActive; hudSuppressed = false; }
         else if (wantHudOff && hud.active) hud.active = false;                       // someone toggled it back on mid-run
         if (feedbackRestoreTick != 0 && tick >= feedbackRestoreTick) { feedbackRestoreTick = 0; mc.getNetworkHandler().sendChatCommand("gamerule sendCommandFeedback true"); }
         runTick();
+        recordingTick();
         bubbleTick();
         aimTick();
 
@@ -737,7 +767,7 @@ public class QuillHider extends Module {
     /** Runs before anything else draws a frame: while a run is live the HUD is off for THIS frame, whatever key was just pressed. */
     @EventHandler(priority = EventPriority.HIGHEST + 1000)
     private void onRender2DFirst(Render2DEvent event) {
-        if (run != RunStage.NONE && Hud.get().active) Hud.get().active = false;
+        if ((run != RunStage.NONE || revealWaiting) && Hud.get().active) Hud.get().active = false;
     }
 
     /**
@@ -757,10 +787,11 @@ public class QuillHider extends Module {
             int rockets = 0;
             for (int i = 0; i < 36; i++) { ItemStack s = mc.player.getInventory().getStack(i); if (s.isOf(Items.FIREWORK_ROCKET)) rockets += s.getCount(); }
             int cx = sw / 2, cy = sh / 2;
-            String big = run == RunStage.FLYING ? "FLYING" : run == RunStage.RETURNING ? "STASHED" : run == RunStage.DESIGNATED ? "TO THE DUNGEON" : "LOOKING";
+            String big = revealWaiting ? "SAVING THE RECORDING" : run == RunStage.FLYING ? "FLYING" : run == RunStage.RETURNING ? "STASHED" : run == RunStage.DESIGNATED ? "TO THE DUNGEON" : "LOOKING";
             event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, big, cx, cy - 10, 0xFFFFFFFF);
             String sub;
-            if (run == RunStage.FLYING) {
+            if (revealWaiting) sub = "one moment";
+            else if (run == RunStage.FLYING) {
                 double left = Math.hypot(mc.player.getX() - targetNX, mc.player.getZ() - targetNZ);
                 double spd = Math.hypot(mc.player.getVelocity().x, mc.player.getVelocity().z) * 20;
                 sub = spd > 5 ? "about " + Math.max(1, (int) Math.ceil(left / spd / 60)) + " min" : "…";   // minutes only: no metres, no speed, no direction
@@ -782,6 +813,7 @@ public class QuillHider extends Module {
                 : run == RunStage.RETURNING ? "stashed - put your blocks back, then pearl or tp away; the hash posts when you're " + returnDistance.get() + " blocks from here" + fix : "";
             if (!top.isEmpty()) event.drawContext.drawTextWithShadow(mc.textRenderer, top, 6, 6, 0xFFE6C85A);
         }
+        if (recReady && recording() && !revealWaiting) event.drawContext.drawCenteredTextWithShadow(mc.textRenderer, "\u25CF REC", sw / 2, 6, 0xFFFF5555);
         if (feed.get()) {
             int y = 6;                                                                 // top right: the HUD is off during runs, so the corner is free
             String head = "quill " + run.name().toLowerCase() + " / " + stage.name().toLowerCase();
@@ -794,6 +826,175 @@ public class QuillHider extends Module {
             }
         }
         event.drawContext.getMatrices().pop();
+    }
+
+    // ------------------------------------------------------------------ the recording
+    // The mod starts the recorder when a run starts and stops it when the run is over. The world is hidden before the
+    // recording begins and stays hidden until it has ended, so a recording never holds the place a run started from or
+    // the place the hider went to. The recorder films the game's own window and the game's own sound, nothing else.
+
+    private static final String PERMISSION_HELP = "macOS has not allowed the recording yet. System Settings > Privacy & Security > Screen & System Audio Recording: switch on the entry for this game (Prism Launcher or java), then quit Prism and start it again.";
+    private Process recorder;                                          // the recorder program, while it runs
+    private File recFile;                                              // what it writes
+    private volatile boolean recReady;                                 // it said READY
+    private volatile String recProblem;                                // or what went wrong
+    private boolean recNoted, recGaveUp, revealWaiting, filing;
+    private long recAskedMs, recReadyMs, recStashMs = -1, recEndMs = -1, revealSince, recStartTick = -1, lastSelfTest;
+    private int recRound = -1, recNumber = -1, recRoundAtStart;        // the book hidden during this recording, if one was
+    private String recServer = "unknown";
+
+    private static File recorderProgram() { return new File(MeteorClient.FOLDER, "quillcoin-recorder"); }
+    private static File publishProgram() { return new File(MeteorClient.FOLDER, "quillcoin-publish"); }
+    private static File recordingsFolder() { return new File(MeteorClient.FOLDER, "quillcoin-recordings"); }
+    private boolean recording() { Process p = recorder; return p != null && p.isAlive(); }
+
+    private void startRecording() {
+        if (recording() || filing || revealWaiting) { recStartTick = tick + 5; return; }   // the last one is still being put away
+        recReady = false; recProblem = null; recNoted = false; recGaveUp = false;
+        recStashMs = recEndMs = -1; recRound = recNumber = -1; recRoundAtStart = effectiveRound(); recServer = serverName();
+        try {
+            File dir = recordingsFolder();
+            dir.mkdirs();
+            recFile = new File(dir, "run-" + (System.currentTimeMillis() / 1000) + ".mp4");
+            final Process p = new ProcessBuilder(recorderProgram().getAbsolutePath(), "--pid", String.valueOf(ProcessHandle.current().pid()), "--out", recFile.getAbsolutePath())
+                .redirectErrorStream(true).start();
+            recorder = p;
+            recAskedMs = System.currentTimeMillis();
+            Thread t = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        if (line.equals("READY")) { recReadyMs = System.currentTimeMillis(); recReady = true; }
+                        else if (line.startsWith("NOPERMISSION")) recProblem = "permission";
+                        else if (line.startsWith("ERROR")) recProblem = line.substring(5).trim();
+                    }
+                } catch (Exception ignored) { }
+            }, "quillcoin-recorder");
+            t.setDaemon(true);
+            t.start();
+        } catch (Exception e) { recorder = null; recFile = null; recordingFailed(String.valueOf(e.getMessage())); }
+    }
+
+    /** Asks the recorder to finish its file. It answers by ending; nothing waits here. */
+    private void stopRecording() {
+        Process p = recorder;
+        if (p == null || !p.isAlive()) return;
+        if (recEndMs < 0) recEndMs = recReady ? System.currentTimeMillis() - recReadyMs : 0;
+        try { OutputStream o = p.getOutputStream(); o.write("stop\n".getBytes(StandardCharsets.UTF_8)); o.flush(); o.close(); } catch (Exception ignored) { }
+    }
+
+    private void recordingTick() {
+        if (recStartTick >= 0 && tick >= recStartTick) { recStartTick = -1; if (run != RunStage.NONE) startRecording(); }
+        Process p = recorder;
+        if (p == null || run == RunStage.NONE || recGaveUp) return;
+        if (recReady && !recNoted) { recNoted = true; audit("recording started"); feed("recording"); }
+        String why = recProblem != null ? ("permission".equals(recProblem) ? "macOS has not allowed it yet" : recProblem)
+            : !p.isAlive() ? "the recorder stopped by itself"
+            : !recReady && System.currentTimeMillis() - recAskedMs > 8000 ? "the recorder did not start" : null;
+        if (why != null) recordingFailed(why);
+    }
+
+    private void recordingFailed(String why) {
+        boolean must = requireRecording.get() && effectiveRound() >= 1, permission = "permission".equals(recProblem);
+        recGaveUp = true;
+        audit("no recording: " + why + (must && run != RunStage.NONE ? " - run void" : ""));
+        Process p = recorder;
+        if (p != null) { if (p.isAlive()) p.destroy(); filing = true; revealSince = System.currentTimeMillis(); }
+        if (permission) warn(PERMISSION_HELP); else warn("No recording: %s.", why);
+        if (must && run != RunStage.NONE) {
+            run = RunStage.NONE; spawner = null; takeoff = Takeoff.NONE; elytraWasActive = false;
+            mc.options.jumpKey.setPressed(false);
+            try { BaritoneAPI.getProvider().getPrimaryBaritone().getPathingBehavior().cancelEverything(); } catch (Throwable ignored) { }
+            warn("A real round's hide has to be recorded - the run is void.");
+        }
+    }
+
+    /** Every client tick, in a world or not: once the recorder has ended, the world may be shown again and the file is put away. */
+    private void filingTick() {
+        if (!revealWaiting && !filing) return;
+        Process p = recorder;
+        if (p != null && p.isAlive()) {
+            if (System.currentTimeMillis() - revealSince > 6000) p.destroyForcibly();      // the screen is never held hostage by a recorder that hangs
+            return;
+        }
+        if (revealWaiting) { revealWaiting = false; setXray(Xray.OFF, null); }
+        if (filing) { filing = false; fileRecording(); }
+    }
+
+    /** The module is being switched off: the recording ends before anything else happens. */
+    private void endRecordingNow() {
+        recStartTick = -1;
+        Process p = recorder;
+        if (p != null && p.isAlive()) {
+            stopRecording();
+            try { if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly(); } catch (InterruptedException ignored) { }
+        }
+        revealWaiting = false; filing = false;
+        if (p != null) fileRecording();
+    }
+
+    /** Names the finished recording after its book (or as a run without one) and writes its notes next to it. Never a position. */
+    private void fileRecording() {
+        File f = recFile;
+        recorder = null; recFile = null;
+        if (f == null || !f.exists() || f.length() == 0) return;
+        final boolean hid = recRound >= 0;
+        final int r = hid ? recRound : recRoundAtStart, n = recNumber;
+        String base = hid ? "r" + r + "-coin-" + n : "no-book-" + f.getName().replace("run-", "").replace(".mp4", "");
+        final File video = new File(f.getParentFile(), base + ".mp4"), notes = new File(f.getParentFile(), base + ".json");
+        if (video.exists() || !f.renameTo(video)) { audit("recording kept under its first name"); return; }
+        String json = "{\n  \"round\": " + r + ",\n  \"number\": " + (hid ? String.valueOf(n) : "null") + ",\n  \"hidden\": " + hid
+            + ",\n  \"server\": \"" + recServer.replaceAll("[^a-z0-9.:-]", "") + "\",\n  \"recorded\": \"" + java.time.Instant.ofEpochMilli(recReadyMs).toString() + "\""
+            + ",\n  \"seconds_to_stash\": " + (recStashMs < 0 ? "null" : String.format(java.util.Locale.ROOT, "%.1f", recStashMs / 1000.0))
+            + ",\n  \"seconds_to_end\": " + (recEndMs < 0 ? "null" : String.format(java.util.Locale.ROOT, "%.1f", recEndMs / 1000.0)) + "\n}\n";
+        try { Files.writeString(notes.toPath(), json, StandardCharsets.UTF_8); } catch (Exception e) { audit("the recording's notes could not be written"); }
+        audit(hid ? "recording saved: R" + r + " Coin " + n : "recording saved: a run without a book");
+        if (hid && r >= 1 && publishRecordings.get() && publishProgram().canExecute()) publish(video, notes, "R" + r + " Coin " + n);
+        else if (hid && r >= 1 && publishRecordings.get()) mc.execute(() -> warn("The recording is saved, but the publish program is not there (meteor-client/quillcoin-publish)."));
+    }
+
+    private void publish(File video, File notes, String name) {
+        new Thread(() -> {
+            String last = "";
+            int code = -1;
+            try {
+                Process p = new ProcessBuilder(publishProgram().getAbsolutePath(), video.getAbsolutePath(), notes.getAbsolutePath()).redirectErrorStream(true).start();
+                p.getOutputStream().close();
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = r.readLine()) != null) if (!line.isBlank()) last = line.trim();
+                }
+                code = p.waitFor();
+            } catch (Exception e) { last = String.valueOf(e.getMessage()); }
+            final boolean ok = code == 0; final String said = last.length() > 120 ? last.substring(0, 120) : last;
+            audit(ok ? "recording published: " + name : "recording not published: " + name);
+            mc.execute(() -> { if (ok) say("The recording of %s is on the site.", name); else warn("The recording of %s is saved but was not published: %s", name, said); });
+        }, "quillcoin-publish").start();
+    }
+
+    /** Two seconds of the game's window, checked and thrown away: tells the hider before any run whether recording works. */
+    private void recorderSelfTest() {
+        try {
+            if (!recorderProgram().canExecute()) { mc.execute(() -> warn("Recording is on, but the recorder program is not there (meteor-client/quillcoin-recorder).")); return; }
+            synchronized (this) { if (System.currentTimeMillis() - lastSelfTest < 600_000) return; lastSelfTest = System.currentTimeMillis(); }
+            Thread.sleep(6000);
+            if (run != RunStage.NONE || recording()) return;
+            Process p = new ProcessBuilder(recorderProgram().getAbsolutePath(), "--pid", String.valueOf(ProcessHandle.current().pid()), "--selftest").redirectErrorStream(true).start();
+            p.getOutputStream().close();
+            String verdict = "";
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) if (line.startsWith("SELFTEST") || line.startsWith("NOPERMISSION") || line.startsWith("ERROR")) verdict = line;
+            }
+            if (!p.waitFor(20, TimeUnit.SECONDS)) p.destroyForcibly();
+            final String v = verdict;
+            mc.execute(() -> {
+                if (v.startsWith("SELFTEST OK")) { say("Recorder ready: %s.", v.substring(11).trim()); if (v.contains("NOT recorded")) warn("The picture records, the game's sound does not."); }
+                else if (v.startsWith("NOPERMISSION")) warn(PERMISSION_HELP);
+                else warn("The recorder has a problem: %s", v.isEmpty() ? "it said nothing" : v);
+            });
+            audit(v.startsWith("SELFTEST OK") ? "recorder checked: ready" : v.startsWith("NOPERMISSION") ? "recorder checked: macOS has not allowed it" : "recorder checked: not working");
+        } catch (Exception ignored) { }
     }
 
     // ------------------------------------------------------------------ the blind run
@@ -809,6 +1010,15 @@ public class QuillHider extends Module {
         }
         if (run != RunStage.NONE) { say("A run is already in progress (%s).", run.name().toLowerCase()); return; }
         if (ringLoading) { info("Still asking the site for the round's ring."); return; }
+        if (revealWaiting || filing) { info("The last recording is still being saved. One moment."); return; }
+        if (recordRuns.get() && !recorderProgram().canExecute()) {
+            if (requireRecording.get() && effectiveRound() >= 1) {
+                audit("run refused: the recorder program is missing");
+                fail("The recorder program is not there (meteor-client/quillcoin-recorder). A real round's hide has to be recorded.");
+                return;
+            }
+            warn("The recorder program is not there - this run is NOT recorded.");
+        }
         final int r = effectiveRound();
         final boolean test = testRadius.get() > 0;
         if (r >= 1) {
@@ -912,6 +1122,7 @@ public class QuillHider extends Module {
         runStartX = mc.player.getX(); runStartZ = mc.player.getZ();      // only to tell a failed takeoff from a flight that was cut short; never written anywhere
         run = RunStage.FLYING;
         audit("run started (" + how + ")");
+        if (recordRuns.get() && recorderProgram().canExecute()) recStartTick = tick + 10;   // half a second: by then the world around the hider is no longer drawn
         try {
             if (savedAutoJump == null) savedAutoJump = BaritoneAPI.getSettings().elytraAutoJump.value;
             BaritoneAPI.getSettings().elytraAutoJump.value = false;
@@ -1443,6 +1654,7 @@ public class QuillHider extends Module {
         long now = System.currentTimeMillis() / 1000;
         boolean blindRun = run == RunStage.DESIGNATED && spawner != null;
         audit("stashed " + pendingTitle + (blindRun ? " at the end of a blind run" : " WITHOUT a blind run"));
+        if (recording() && recReady) { recRound = effectiveRound(); recNumber = pendingNumber; recStashMs = System.currentTimeMillis() - recReadyMs; }
         String line = effectiveRound() + "," + pendingNumber + "," + pendingHash + "," + now + ",0," + (blindRun ? 1 : 0) + "," + serverName() + "," + (pendingLoc == null ? "" : pendingLoc) + "," + (pendingQuoteIdx < 0 ? "" : pendingQuoteIdx);
         stashX = mc.player.getX(); stashZ = mc.player.getZ();
         spawner = null;

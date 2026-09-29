@@ -54,10 +54,24 @@ visible: `meteor-client/quillcoin-audit.txt` is an append-only log (no coordinat
 (module switched off, blind flight turned off, portal exit too far, dimension change). It is published with each round next to the hash list.
 While a run is live or the screen is covered, Meteor's GUI (click GUI, HUD editor, settings) cannot be opened and Meteor's whole HUD is switched off (any element - Position, Waypoints - can be added in two clicks otherwise) and restored afterwards. The hider instance should carry nothing but Meteor, Baritone, performance mods and this addon - no map mods, no HUDs that print coordinates.
 
+## The recording (0.7)
+Every run records itself. Nobody presses record, so nobody chooses what gets filmed.
+
+- **What is recorded:** the game's own window and the game's own sound. Not the screen, not other windows, not notifications, not the microphone. The recorder is a small program of its own (`recorder/quillcoin-recorder.swift`, macOS 15 or newer, ScreenCaptureKit) that the mod starts with the game's process id; it can only film a window of that process.
+- **From when to when:** half a second after the run starts, until the hider is away from the chest (the pearl home, or a run that was voided). The world is hidden *before* the recording begins and stays hidden until the recorder has ended: the screen goes black and reads `SAVING THE RECORDING` for that moment. So a recording holds neither the place a run started from nor the place the hider went to.
+- **On screen:** a red `● REC` at the top for as long as it records.
+- **No recording, no hide:** with `require-recording` on, a run of a real round does not start without the recorder, and is void if the recording fails half way.
+- **Where it goes:** `meteor-client/quillcoin-recordings/r1-coin-37.mp4`, with notes next to it (`.json`: round, number, the server, and how many seconds into the recording the book went in and the run ended - never a position). A run that hid no book is kept as `no-book-<time>.mp4`.
+- **Publishing:** with `publish` on, the mod then starts `meteor-client/quillcoin-publish <recording> <notes>`, a program of your own that puts the recording on the site (the site's `tools/publish_hide.py` does it), and says in chat how it went.
+- **A check before any run:** when you join a server the mod records two seconds, checks that picture and sound are there, throws them away, and tells you. The first time, macOS has to be told that the game may be recorded: System Settings > Privacy & Security > Screen & System Audio Recording.
+
+Build the recorder with `recorder/build.sh` and put it at `meteor-client/quillcoin-recorder`.
+
 ## What it refuses
 - Hiding while logged in as anyone but the configured author.
 - Hiding while a chest-logging module (ChestDump, StashAudit, NetWorth, LayerKit) is on.
 - Hiding into a full chest.
+- A run of a real round that cannot be recorded.
 
 ## Numbers
 Coin numbers are drawn at random from `1..numbers-per-round`, so `R1 Coin 37` says nothing about when or where it was hidden.

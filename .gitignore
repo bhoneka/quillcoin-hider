@@ -2,3 +2,6 @@ build/
 .gradle/
 *.jar.new
 book/
+
+# the recorder is built on the machine that uses it
+recorder/quillcoin-recorder
