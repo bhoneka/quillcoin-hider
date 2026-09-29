@@ -52,6 +52,7 @@ import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
 import net.minecraft.world.chunk.WorldChunk;
 import java.util.Map;
 import net.minecraft.client.gui.screen.ingame.BookScreen;
+import net.minecraft.client.gui.screen.ingame.BookEditScreen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.WrittenBookContentComponent;
@@ -472,7 +473,7 @@ public class QuillHider extends Module {
         String title = "R" + effectiveRound() + " Coin " + number;
         pendingHash = sha256(code);
         pendingPages = bookPages(code, title, effectiveRound(), number, pendingHash);
-        pendingPlain = plainPages(pendingPages);                      // the same book without colours or ornaments, in case the server refuses those
+        pendingVersions = versions(pendingPages, effectiveRound() == 0);   // the same book in plainer and plainer words, in case the server refuses some of them
         pendingLoc = sealLocation(code);                              // where we stand, readable by nobody until this code is redeemed
         code = null;                                                  // the code's whole life: made, written, hashed, sealed, gone
         pendingNumber = number;
@@ -490,8 +491,32 @@ public class QuillHider extends Module {
         stageSince = tick;
     }
 
-    private List<String> pendingPages, pendingPlain;
+    private List<String> pendingPages;
+    private List<Version> pendingVersions;
     private int signTry;
+
+    /** One way of writing the same book. "probe" is not a coin at all: one page that says test, to learn whether the server signs anything. */
+    record Version(String name, String title, List<String> pages, boolean probe) { }
+
+    /**
+     * 2b2t runs a filter over what players write. Nobody outside knows its list, so the book is offered in steps,
+     * each one giving up a little more, and the audit log names the step the server accepted:
+     * decorated, plain, the address spelled out, a word changed, no quote - and, in the test round only, a bare test page.
+     */
+    static List<Version> versions(List<String> decorated, boolean withProbe) {
+        List<Version> v = new ArrayList<>();
+        v.add(new Version("decorated", null, decorated, false));
+        List<String> plain = plainPages(decorated);
+        v.add(new Version("plain text", null, plain, false));
+        List<String> noLink = plain.stream().map(p -> p.replaceAll("(?i)quillcoin\\.gg", "quillcoin dot gg")).toList();
+        v.add(new Version("plain text, address spelled out", null, noLink, false));
+        List<String> noWord = noLink.stream().map(p -> p.replaceAll("(?i)whoever", "the one who")).toList();
+        v.add(new Version("plain text, address spelled out, 'whoever' reworded", null, noWord, false));
+        List<String> noQuote = noWord.stream().map(p -> p.toLowerCase().contains("anonymous") ? "- anonymous" : p).toList();
+        v.add(new Version("plain text, address spelled out, 'whoever' reworded, no quote", null, noQuote, false));
+        if (withProbe) v.add(new Version("a bare test page", "test", List.of("test"), true));
+        return v;
+    }
     private BlockHitResult lastChest, chestToReopen;
 
     /** The chest that was opened last, so the mod can open the same one again after the book is signed. */
@@ -529,13 +554,13 @@ public class QuillHider extends Module {
         return out;
     }
 
-    private void sendSign(List<String> pages) {
-        mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(mc.player.getInventory().selectedSlot, pages, Optional.of(pendingTitle)));
+    private void sendSign(Version v) {
+        mc.getNetworkHandler().sendPacket(new BookUpdateC2SPacket(mc.player.getInventory().selectedSlot, v.pages(), Optional.of(v.title() == null ? pendingTitle : v.title())));
         stage = Stage.SIGNING;
         stageSince = tick;
     }
 
-    private void forgetPages() { pendingPages = null; pendingPlain = null; }
+    private void forgetPages() { pendingPages = null; pendingVersions = null; }
 
     private void retryStash() {
         if (!(mc.currentScreen instanceof HandledScreen<?> hs) || !(hs.getScreenHandler() instanceof GenericContainerScreenHandler handler)) {
@@ -585,16 +610,26 @@ public class QuillHider extends Module {
                 if (mc.player.getInventory().selectedSlot != pendingSlot || !mc.player.getInventory().getStack(pendingSlot).isOf(Items.WRITABLE_BOOK)) {
                     stage = Stage.IDLE; forgetPages();
                     fail("The book-and-quill left your hand. Nothing was hidden; the number is free again.");
-                } else if (tick - stageSince >= 6) {                                 // the server has seen the chest close and the slot change
+                } else if (tick - stageSince == 3) {
+                    mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);   // what a player does first: open the book (the screen itself is kept shut)
+                } else if (tick - stageSince >= 12) {                                // the server has seen the chest close, the slot change and the book open
                     feed("asking the server to sign");
-                    sendSign(pendingPages);
+                    sendSign(pendingVersions.get(0));
                 }
             }
             case SIGNING -> {
                 ItemStack st = mc.player.getInventory().getStack(pendingSlot);
                 if (isCoinBook(st)) {
-                    audit(signTry == 0 ? "the server signed the book" : "the server signed the book as plain text (it would not take the decorated pages)");
+                    Version got = pendingVersions.get(Math.min(signTry, pendingVersions.size() - 1));
                     forgetPages();
+                    if (got.probe()) {
+                        // not a coin: it only shows that the server signs books as such, so something in the coin book's words is being refused
+                        stage = Stage.IDLE; pendingHash = null; pendingLoc = null;
+                        audit("the server signed a bare test page but none of the coin book's versions - its filter refuses something the book says. nothing hidden");
+                        fail("The server signs a bare test page, but not the coin book in any wording. Nothing was hidden. Throw the test book away.");
+                        return;
+                    }
+                    audit("the server signed the book: " + got.name());
                     if (chestToReopen != null) {
                         mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, chestToReopen);
                         mc.player.swingHand(Hand.MAIN_HAND);
@@ -606,13 +641,13 @@ public class QuillHider extends Module {
                         warn("Book signed. Open the chest and press %s - and do not open the book.", stashKey.get());
                     }
                 } else if (tick - stageSince > 100) {
-                    if (signTry == 0 && pendingPlain != null && st.isOf(Items.WRITABLE_BOOK)) {
-                        signTry = 1;
-                        audit("the server did not sign the decorated pages - trying the same book as plain text");
-                        sendSign(pendingPlain);
+                    if (signTry + 1 < pendingVersions.size() && st.isOf(Items.WRITABLE_BOOK)) {
+                        audit("the server did not sign: " + pendingVersions.get(signTry).name() + " - trying: " + pendingVersions.get(signTry + 1).name());
+                        signTry++;
+                        sendSign(pendingVersions.get(signTry));
                     } else {
                         stage = Stage.IDLE; forgetPages();
-                        audit("the server did not sign the book - nothing hidden");
+                        audit("the server did not sign the book in any wording - nothing hidden");
                         fail("The server didn't sign the book. Nothing was hidden; the number is free again.");
                     }
                 }
@@ -684,6 +719,7 @@ public class QuillHider extends Module {
             warn("Meteor's GUI is locked while a run is live.");
             return;
         }
+        if (event.screen instanceof BookEditScreen && (stage == Stage.PREPARE || stage == Stage.SIGNING)) { event.cancel(); return; }
         if (!(event.screen instanceof BookScreen) || mc.isInSingleplayer()) return;
         if (isCoinBook(mc.player.getMainHandStack()) || isCoinBook(mc.player.getOffHandStack())) {
             event.cancel();
