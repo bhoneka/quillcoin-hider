@@ -76,6 +76,7 @@ Baritone sometimes lands, or is knocked down, and goes on saying that it is flyi
 - Hiding while a chest-logging module (ChestDump, StashAudit, NetWorth, LayerKit) is on.
 - Hiding into a full chest.
 - A run of a real round that cannot be recorded.
+- A dungeon without a chest: it is never chosen as the run's dungeon, and if the chest is gone by the time the hider stands in the room, the run moves on to the next dungeon.
 
 ## Numbers
 Coin numbers are drawn at random from `1..numbers-per-round`, so `R1 Coin 37` says nothing about when or where it was hidden.

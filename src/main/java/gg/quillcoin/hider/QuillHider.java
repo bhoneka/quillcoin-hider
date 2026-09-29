@@ -43,6 +43,7 @@ import java.util.LinkedHashMap;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.block.entity.MobSpawnerBlockEntity;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.util.math.BlockPos;
@@ -1172,6 +1173,7 @@ public class QuillHider extends Module {
             how += minFlight.get() > 0 ? ", at least " + minFlight.get() + " nether blocks from the start" : "";
         }
         spawner = null;
+        noChest.clear();
         elytraWasActive = false;
         takeoff = Takeoff.NONE;
         takeoffTries = 0;
@@ -1367,6 +1369,14 @@ public class QuillHider extends Module {
                 }
                 setXray(Xray.DUNGEON, spawner);
                 boolean inside = mc.player.getBlockPos().isWithinDistance(spawner, dungeonRadius.get());
+                if (inside && stage == Stage.IDLE && tick % 20 == 0 && !hasChest(spawner)) {
+                    noChest.add(spawner);
+                    spawner = null; revealed = false;
+                    run = RunStage.OVERWORLD;
+                    audit("the dungeon has no chest - looking for another");
+                    warn("This dungeon has no chest. Looking for another one - the run goes on.");
+                    return;
+                }
                 if (inside && !revealed) { revealed = true; audit("in the dungeon"); say("You're in the dungeon. Open the chest and press %s.", stashKey.get()); }
             }
             case RETURNING -> {
@@ -1436,11 +1446,29 @@ public class QuillHider extends Module {
                 var below = mc.world.getBlockState(p.down());
                 if (!below.isOf(Blocks.COBBLESTONE) && !below.isOf(Blocks.MOSSY_COBBLESTONE)) continue;
                 if (!inRing(p.getX() + 0.5, p.getZ() + 0.5, ringLo, ringHi)) continue;        // a dungeon outside the round's ring is never the run's dungeon
+                if (noChest.contains(p) || !hasChest(p)) continue;                              // a book needs a chest: a dungeon without one is never the run's dungeon
                 double d = p.getSquaredDistance(mc.player.getPos());
                 if (d < bestD) { bestD = d; best = p.toImmutable(); }
             }
         }
         return best;
+    }
+
+    /** Dungeons of this run that turned out to have no chest. Memory only, gone when the run ends. */
+    private final Set<BlockPos> noChest = new HashSet<>();
+
+    /** A chest in the room of this spawner. The room reaches four blocks from its spawner at most, and its chests stand on the spawner's own level. */
+    private boolean hasChest(BlockPos sp) {
+        int scx = sp.getX() >> 4, scz = sp.getZ() >> 4;
+        for (int cx = scx - 1; cx <= scx + 1; cx++) for (int cz = scz - 1; cz <= scz + 1; cz++) {
+            if (!mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
+            for (Map.Entry<BlockPos, BlockEntity> e : mc.world.getChunk(cx, cz).getBlockEntities().entrySet()) {
+                if (!(e.getValue() instanceof ChestBlockEntity)) continue;
+                BlockPos c = e.getKey();
+                if (Math.abs(c.getX() - sp.getX()) <= 4 && Math.abs(c.getZ() - sp.getZ()) <= 4 && Math.abs(c.getY() - sp.getY()) <= 1) return true;
+            }
+        }
+        return false;
     }
 
     /** Relative guidance only: bearing words, distance, depth. Never a coordinate. */
